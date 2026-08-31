@@ -25,13 +25,9 @@ const (
 	fallbackDefaultModel   = "z-ai/glm-5.3-flash"
 	freeModelPrimary       = "z-ai/glm-5.3-flash"
 	freeModelFallback      = "deepseek/deepseek-v4-flash"
-	freeModelLastResort    = "cline-free/longcat-2.0"
 )
 
-// freeModelChain 是 model="free" 时的降级顺序。
-// 顺序依据 Artificial Analysis Intelligence Index v4.1.1：
-// glm-5.3-flash 57 > deepseek-v4-flash 0731 52 > longcat-2.0 34。
-var freeModelChain = []string{freeModelPrimary, freeModelFallback, freeModelLastResort}
+var freeModelChain = []string{freeModelPrimary, freeModelFallback}
 
 // builtinModels 是内置默认模型列表（不可删除），仅作为离线 / 未同步时的 fallback。
 // 同步 Cline 官方推荐模型成功后，getAllModels 以远程模型为主。
@@ -663,8 +659,13 @@ func clineErrorHTTPStatus(err error) int {
 
 func callClineAPI(params map[string]any, stream bool) (*http.Response, *Account, error) {
 	model, _ := params["model"].(string)
-	if model == "free" {
+	switch model {
+	case "free":
 		return callFreeClineAPI(params, stream)
+	case "free-glm":
+		return callFreeClineAPIForModel(params, stream, freeModelPrimary)
+	case "free-ds":
+		return callFreeClineAPIForModel(params, stream, freeModelFallback)
 	}
 
 	acc := pickAccountForModel(model)
@@ -676,28 +677,42 @@ func callClineAPI(params map[string]any, stream bool) (*http.Response, *Account,
 
 func callFreeClineAPI(params map[string]any, stream bool) (*http.Response, *Account, error) {
 	for _, model := range freeModelChain {
-		params["model"] = model
-		for {
-			acc := pickAccountForModelStrict(model)
-			if acc == nil {
-				break
-			}
-
-			resp, usedAcc, err := callClineAPIWithAccount(acc, params, stream)
-			if err == nil {
-				return resp, usedAcc, nil
-			}
-			var accountErr *clineAccountUnavailableError
-			if errors.As(err, &accountErr) {
-				continue
-			}
-			apiErr, ok := err.(*clineAPIError)
-			if !ok || apiErr.statusCode != http.StatusTooManyRequests {
-				return nil, usedAcc, err
-			}
+		resp, usedAcc, err := callFreeClineAPIForModel(params, stream, model)
+		if err == nil {
+			return resp, usedAcc, nil
+		}
+		if _, unavailable := err.(*freeModelUnavailableError); unavailable {
+			continue
+		}
+		apiErr, ok := err.(*clineAPIError)
+		if !ok || apiErr.statusCode != http.StatusTooManyRequests {
+			return nil, usedAcc, err
 		}
 	}
 	return nil, nil, &freeModelUnavailableError{message: "no eligible accounts available for free models"}
+}
+
+func callFreeClineAPIForModel(params map[string]any, stream bool, model string) (*http.Response, *Account, error) {
+	params["model"] = model
+	for {
+		acc := pickAccountForModelStrict(model)
+		if acc == nil {
+			return nil, nil, &freeModelUnavailableError{message: "no eligible accounts available for free models"}
+		}
+
+		resp, usedAcc, err := callClineAPIWithAccount(acc, params, stream)
+		if err == nil {
+			return resp, usedAcc, nil
+		}
+		var accountErr *clineAccountUnavailableError
+		if errors.As(err, &accountErr) {
+			continue
+		}
+		apiErr, ok := err.(*clineAPIError)
+		if !ok || apiErr.statusCode != http.StatusTooManyRequests {
+			return nil, usedAcc, err
+		}
+	}
 }
 
 func callClineAPIWithAccount(acc *Account, params map[string]any, stream bool) (*http.Response, *Account, error) {

@@ -868,3 +868,145 @@ func TestHandleResponsesFreeReturnsTooManyRequestsWhenBothPoolsUnavailable(t *te
 		t.Fatalf("request log model = %q, want %q", requestLogs[0].Model, lastModel)
 	}
 }
+
+func TestCallClineAPIFreeDSExhaustsOnlyDSPool(t *testing.T) {
+	oldPool := pool
+	oldConfig := getProxyConfig()
+	oldTransport := httpClient.Transport
+	t.Cleanup(func() {
+		pool = oldPool
+		setProxyConfig(oldConfig)
+		httpClient.Transport = oldTransport
+	})
+
+	first := &Account{
+		AccountID:   "free-ds-one",
+		Email:       "free-ds-one@example.com",
+		AccessToken: "free-ds-one-token",
+		ExpiresAt:   time.Now().Add(time.Hour).UnixMilli(),
+		Status:      "active",
+	}
+	second := &Account{
+		AccountID:   "free-ds-two",
+		Email:       "free-ds-two@example.com",
+		AccessToken: "free-ds-two-token",
+		ExpiresAt:   time.Now().Add(time.Hour).UnixMilli(),
+		Status:      "active",
+	}
+	pool = &AccountPool{Accounts: []*Account{first, second}}
+	config := defaultProxyConfig()
+	config.Strategy = "fill"
+	setProxyConfig(config)
+
+	var attempts []string
+	var models []string
+	httpClient.Transport = freeModelRoundTripper(func(req *http.Request) (*http.Response, error) {
+		token := strings.TrimPrefix(req.Header.Get("Authorization"), "Bearer ")
+		attempts = append(attempts, token)
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			return nil, err
+		}
+		var params map[string]any
+		if err := json.Unmarshal(body, &params); err != nil {
+			return nil, err
+		}
+		model, _ := params["model"].(string)
+		models = append(models, model)
+		return &http.Response{
+			StatusCode: http.StatusTooManyRequests,
+			Body:       io.NopCloser(strings.NewReader(`{"error":"quota","message":"Try again in 1h"}`)),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	})
+
+	params := map[string]any{
+		"model":    "free-ds",
+		"messages": []any{map[string]any{"role": "user", "content": "hello"}},
+	}
+	_, _, err := callClineAPI(params, false)
+	if err == nil {
+		t.Fatal("callClineAPI should fail when every DS account is cooling")
+	}
+	if got, want := strings.Join(attempts, ","), "free-ds-one-token,free-ds-two-token"; got != want {
+		t.Fatalf("attempts = %q, want %q", got, want)
+	}
+	if got, want := strings.Join(models, ","), freeModelFallback+","+freeModelFallback; got != want {
+		t.Fatalf("models = %q, want %q", got, want)
+	}
+	if got, want := params["model"], freeModelFallback; got != want {
+		t.Fatalf("effective model = %v, want %q", got, want)
+	}
+}
+
+func TestCallClineAPIFreeUsesOnlyGLMThenDS(t *testing.T) {
+	oldPool := pool
+	oldConfig := getProxyConfig()
+	oldTransport := httpClient.Transport
+	t.Cleanup(func() {
+		pool = oldPool
+		setProxyConfig(oldConfig)
+		httpClient.Transport = oldTransport
+	})
+
+	first := &Account{
+		AccountID:   "free-chain-one",
+		Email:       "free-chain-one@example.com",
+		AccessToken: "free-chain-one-token",
+		ExpiresAt:   time.Now().Add(time.Hour).UnixMilli(),
+		Status:      "active",
+	}
+	second := &Account{
+		AccountID:   "free-chain-two",
+		Email:       "free-chain-two@example.com",
+		AccessToken: "free-chain-two-token",
+		ExpiresAt:   time.Now().Add(time.Hour).UnixMilli(),
+		Status:      "active",
+	}
+	pool = &AccountPool{Accounts: []*Account{first, second}}
+	config := defaultProxyConfig()
+	config.Strategy = "fill"
+	setProxyConfig(config)
+
+	var attempts []string
+	var models []string
+	httpClient.Transport = freeModelRoundTripper(func(req *http.Request) (*http.Response, error) {
+		token := strings.TrimPrefix(req.Header.Get("Authorization"), "Bearer ")
+		attempts = append(attempts, token)
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			return nil, err
+		}
+		var params map[string]any
+		if err := json.Unmarshal(body, &params); err != nil {
+			return nil, err
+		}
+		model, _ := params["model"].(string)
+		models = append(models, model)
+		return &http.Response{
+			StatusCode: http.StatusTooManyRequests,
+			Body:       io.NopCloser(strings.NewReader(`{"error":"quota","message":"Try again in 1h"}`)),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	})
+
+	params := map[string]any{
+		"model":    "free",
+		"messages": []any{map[string]any{"role": "user", "content": "hello"}},
+	}
+	_, _, err := callClineAPI(params, false)
+	if err == nil {
+		t.Fatal("callClineAPI should fail when both free pools are cooling")
+	}
+	if got, want := strings.Join(attempts, ","), "free-chain-one-token,free-chain-two-token,free-chain-one-token,free-chain-two-token"; got != want {
+		t.Fatalf("attempts = %q, want %q", got, want)
+	}
+	if got, want := strings.Join(models, ","), freeModelPrimary+","+freeModelPrimary+","+freeModelFallback+","+freeModelFallback; got != want {
+		t.Fatalf("models = %q, want %q", got, want)
+	}
+	if got, want := params["model"], freeModelFallback; got != want {
+		t.Fatalf("effective model = %v, want %q", got, want)
+	}
+}
