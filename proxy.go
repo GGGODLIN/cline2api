@@ -684,10 +684,7 @@ func callFreeClineAPI(params map[string]any, stream bool) (*http.Response, *Acco
 		if _, unavailable := err.(*freeModelUnavailableError); unavailable {
 			continue
 		}
-		apiErr, ok := err.(*clineAPIError)
-		if !ok || apiErr.statusCode != http.StatusTooManyRequests {
-			return nil, usedAcc, err
-		}
+		return nil, usedAcc, err
 	}
 	return nil, nil, &freeModelUnavailableError{message: "no eligible accounts available for free models"}
 }

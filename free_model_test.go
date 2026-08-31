@@ -1010,3 +1010,57 @@ func TestCallClineAPIFreeUsesOnlyGLMThenDS(t *testing.T) {
 		t.Fatalf("effective model = %v, want %q", got, want)
 	}
 }
+
+func TestCallClineAPIFreeStopsOnNonQuotaAPIError(t *testing.T) {
+	oldPool := pool
+	oldConfig := getProxyConfig()
+	oldTransport := httpClient.Transport
+	t.Cleanup(func() {
+		pool = oldPool
+		setProxyConfig(oldConfig)
+		httpClient.Transport = oldTransport
+	})
+
+	account := &Account{
+		AccountID:   "non-quota-error",
+		Email:       "non-quota-error@example.com",
+		AccessToken: "non-quota-error-token",
+		ExpiresAt:   time.Now().Add(time.Hour).UnixMilli(),
+		Status:      "active",
+	}
+	pool = &AccountPool{Accounts: []*Account{account}}
+	setProxyConfig(defaultProxyConfig())
+
+	calls := 0
+	httpClient.Transport = freeModelRoundTripper(func(req *http.Request) (*http.Response, error) {
+		calls++
+		return &http.Response{
+			StatusCode: http.StatusBadGateway,
+			Body:       io.NopCloser(strings.NewReader(`{"error":"upstream failure"}`)),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	})
+
+	params := map[string]any{
+		"model":    "free",
+		"messages": []any{map[string]any{"role": "user", "content": "hello"}},
+	}
+	_, _, err := callClineAPI(params, false)
+	if err == nil {
+		t.Fatal("callClineAPI should return the non-quota API error")
+	}
+	apiErr, ok := err.(*clineAPIError)
+	if !ok {
+		t.Fatalf("error type = %T, want *clineAPIError", err)
+	}
+	if apiErr.statusCode != http.StatusBadGateway {
+		t.Fatalf("error status = %d, want %d", apiErr.statusCode, http.StatusBadGateway)
+	}
+	if calls != 1 {
+		t.Fatalf("upstream calls = %d, want 1", calls)
+	}
+	if got, want := params["model"], freeModelPrimary; got != want {
+		t.Fatalf("effective model = %v, want %q", got, want)
+	}
+}
