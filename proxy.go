@@ -20,11 +20,14 @@ import (
 )
 
 const (
-	defaultMaxTokens       = 128000
-	defaultReasoningEffort = "high"
-	fallbackDefaultModel   = "z-ai/glm-5.3-flash"
-	freeModelPrimary       = "z-ai/glm-5.3-flash"
-	freeModelFallback      = "deepseek/deepseek-v4-flash"
+	defaultMaxTokens                     = 128000
+	defaultReasoningEffort               = "high"
+	fallbackDefaultModel                 = "z-ai/glm-5.3-flash"
+	freeModelPrimary                     = "z-ai/glm-5.3-flash"
+	freeModelFallback                    = "deepseek/deepseek-v4-flash"
+	freeModelV41Alias                    = "free-v41"
+	freeModelV41                         = "deepseek/deepseek-v4.1-flash"
+	freeModelInsufficientCreditsCooldown = 24 * time.Hour
 )
 
 var freeModelChain = []string{freeModelPrimary, freeModelFallback}
@@ -622,12 +625,26 @@ func clineHeaders(token, sessionID string) http.Header {
 }
 
 type clineAPIError struct {
-	statusCode int
-	message    string
+	statusCode        int
+	message           string
+	accountQuotaError bool
 }
 
 func (e *clineAPIError) Error() string {
 	return fmt.Sprintf("API %d: %s", e.statusCode, e.message)
+}
+
+func isInsufficientCreditsError(body string) bool {
+	var payload struct {
+		Code  string `json:"code"`
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(body), &payload); err != nil {
+		return false
+	}
+	return payload.Code == "insufficient_credits" || payload.Error.Code == "insufficient_credits"
 }
 
 type clineAccountUnavailableError struct {
@@ -666,6 +683,8 @@ func callClineAPI(params map[string]any, stream bool) (*http.Response, *Account,
 		return callFreeClineAPIForModel(params, stream, freeModelPrimary)
 	case "free-ds":
 		return callFreeClineAPIForModel(params, stream, freeModelFallback)
+	case freeModelV41Alias:
+		return callFreeClineAPIForModel(params, stream, freeModelV41)
 	}
 
 	acc := pickAccountForModel(model)
@@ -706,7 +725,7 @@ func callFreeClineAPIForModel(params map[string]any, stream bool, model string) 
 			continue
 		}
 		apiErr, ok := err.(*clineAPIError)
-		if !ok || apiErr.statusCode != http.StatusTooManyRequests {
+		if !ok || (!apiErr.accountQuotaError && apiErr.statusCode != http.StatusTooManyRequests) {
 			return nil, usedAcc, err
 		}
 	}
@@ -781,9 +800,9 @@ func callClineAPIWithAccount(acc *Account, params map[string]any, stream bool) (
 		bodyBytes, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		bodyStr := string(bodyBytes)
-		// 429：模型级冷却 —— 只暂停该模型，账号保持可用，其他模型继续转发
-		if resp.StatusCode == 429 {
-			model, _ := body["model"].(string)
+		model, _ := body["model"].(string)
+		accountQuotaError := resp.StatusCode == http.StatusPaymentRequired && model == freeModelV41 && isInsufficientCreditsError(bodyStr)
+		if resp.StatusCode == http.StatusTooManyRequests {
 			until := parseCooldownUntil(bodyStr)
 			if model != "" {
 				setModelCooldown(acc, model, until)
@@ -793,7 +812,14 @@ func callClineAPIWithAccount(acc *Account, params map[string]any, stream bool) (
 				savePool()
 			}
 		}
-		return nil, acc, &clineAPIError{statusCode: resp.StatusCode, message: truncate(bodyStr, 500)}
+		if accountQuotaError {
+			setModelCooldown(acc, model, time.Now().Add(freeModelInsufficientCreditsCooldown))
+		}
+		return nil, acc, &clineAPIError{
+			statusCode:        resp.StatusCode,
+			message:           truncate(bodyStr, 500),
+			accountQuotaError: accountQuotaError,
+		}
 	}
 
 	acc.LastUsed = time.Now()

@@ -1011,6 +1011,180 @@ func TestCallClineAPIFreeUsesOnlyGLMThenDS(t *testing.T) {
 	}
 }
 
+func TestCallClineAPIFreeV41RetriesNextAccountAfterInsufficientCredits(t *testing.T) {
+	oldPool := pool
+	oldConfig := getProxyConfig()
+	oldTransport := httpClient.Transport
+	t.Cleanup(func() {
+		pool = oldPool
+		setProxyConfig(oldConfig)
+		httpClient.Transport = oldTransport
+	})
+
+	first := &Account{
+		AccountID:   "v41-one",
+		Email:       "v41-one@example.com",
+		AccessToken: "v41-one-token",
+		ExpiresAt:   time.Now().Add(time.Hour).UnixMilli(),
+		Status:      "active",
+	}
+	second := &Account{
+		AccountID:   "v41-two",
+		Email:       "v41-two@example.com",
+		AccessToken: "v41-two-token",
+		ExpiresAt:   time.Now().Add(time.Hour).UnixMilli(),
+		Status:      "active",
+	}
+	pool = &AccountPool{Accounts: []*Account{first, second}}
+	config := defaultProxyConfig()
+	config.Strategy = "fill"
+	setProxyConfig(config)
+
+	const upstreamModel = "deepseek/deepseek-v4.1-flash"
+	var attempts []string
+	var models []string
+	httpClient.Transport = freeModelRoundTripper(func(req *http.Request) (*http.Response, error) {
+		token := strings.TrimPrefix(req.Header.Get("Authorization"), "Bearer ")
+		attempts = append(attempts, token)
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			return nil, err
+		}
+		var params map[string]any
+		if err := json.Unmarshal(body, &params); err != nil {
+			return nil, err
+		}
+		model, _ := params["model"].(string)
+		models = append(models, model)
+		if token == "v41-one-token" {
+			return &http.Response{
+				StatusCode: http.StatusPaymentRequired,
+				Body:       io.NopCloser(strings.NewReader(`{"error":{"code":"insufficient_credits"},"balance":-0.02}`)),
+				Header:     make(http.Header),
+				Request:    req,
+			}, nil
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"id":"ok","choices":[]}`)),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	})
+
+	params := map[string]any{
+		"model":    "free-v41",
+		"messages": []any{map[string]any{"role": "user", "content": "hello"}},
+	}
+	resp, acc, err := callClineAPI(params, false)
+	if err != nil {
+		t.Fatalf("callClineAPI returned error: %v", err)
+	}
+	if resp == nil {
+		t.Fatal("callClineAPI returned nil response")
+	}
+	resp.Body.Close()
+	if acc != second {
+		t.Fatalf("selected account = %v, want second V4.1 account", acc)
+	}
+	if got, want := strings.Join(attempts, ","), "v41-one-token,v41-two-token"; got != want {
+		t.Fatalf("attempts = %q, want %q", got, want)
+	}
+	if got, want := strings.Join(models, ","), upstreamModel+","+upstreamModel; got != want {
+		t.Fatalf("models = %q, want %q", got, want)
+	}
+	if got, want := params["model"], upstreamModel; got != want {
+		t.Fatalf("effective model = %v, want %q", got, want)
+	}
+	if first.Status != "active" {
+		t.Fatalf("first account status = %q, want active", first.Status)
+	}
+	if !modelCooldownActive(first, upstreamModel) {
+		t.Fatal("first account should have a V4.1 model cooldown")
+	}
+	if time.Until(first.ModelCooldowns[upstreamModel]) < 23*time.Hour {
+		t.Fatalf("V4.1 cooldown = %s, want at least 23h", time.Until(first.ModelCooldowns[upstreamModel]))
+	}
+	if modelCooldownActive(first, freeModelPrimary) {
+		t.Fatal("first account should not have a GLM model cooldown")
+	}
+	if !first.CooldownUntil.IsZero() {
+		t.Fatalf("account cooldown = %s, want zero", first.CooldownUntil)
+	}
+}
+
+func TestCallClineAPIFreeV41DoesNotFailoverOnOtherPaymentRequired(t *testing.T) {
+	oldPool := pool
+	oldConfig := getProxyConfig()
+	oldTransport := httpClient.Transport
+	t.Cleanup(func() {
+		pool = oldPool
+		setProxyConfig(oldConfig)
+		httpClient.Transport = oldTransport
+	})
+
+	first := &Account{
+		AccountID:   "v41-payment-one",
+		Email:       "v41-payment-one@example.com",
+		AccessToken: "v41-payment-one-token",
+		ExpiresAt:   time.Now().Add(time.Hour).UnixMilli(),
+		Status:      "active",
+	}
+	second := &Account{
+		AccountID:   "v41-payment-two",
+		Email:       "v41-payment-two@example.com",
+		AccessToken: "v41-payment-two-token",
+		ExpiresAt:   time.Now().Add(time.Hour).UnixMilli(),
+		Status:      "active",
+	}
+	pool = &AccountPool{Accounts: []*Account{first, second}}
+	config := defaultProxyConfig()
+	config.Strategy = "fill"
+	setProxyConfig(config)
+
+	calls := 0
+	httpClient.Transport = freeModelRoundTripper(func(req *http.Request) (*http.Response, error) {
+		calls++
+		return &http.Response{
+			StatusCode: http.StatusPaymentRequired,
+			Body:       io.NopCloser(strings.NewReader(`{"error":{"code":"payment_required"}}`)),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	})
+
+	params := map[string]any{
+		"model":    "free-v41",
+		"messages": []any{map[string]any{"role": "user", "content": "hello"}},
+	}
+	_, acc, err := callClineAPI(params, false)
+	if err == nil {
+		t.Fatal("callClineAPI should return the payment-required error")
+	}
+	apiErr, ok := err.(*clineAPIError)
+	if !ok {
+		t.Fatalf("error type = %T, want *clineAPIError", err)
+	}
+	if apiErr.statusCode != http.StatusPaymentRequired {
+		t.Fatalf("error status = %d, want %d", apiErr.statusCode, http.StatusPaymentRequired)
+	}
+	if acc != first {
+		t.Fatalf("selected account = %v, want first V4.1 account", acc)
+	}
+	if calls != 1 {
+		t.Fatalf("upstream calls = %d, want 1", calls)
+	}
+	if first.Status != "active" {
+		t.Fatalf("first account status = %q, want active", first.Status)
+	}
+	if modelCooldownActive(first, freeModelV41) {
+		t.Fatal("other payment-required errors should not set a V4.1 model cooldown")
+	}
+	if !first.CooldownUntil.IsZero() {
+		t.Fatalf("account cooldown = %s, want zero", first.CooldownUntil)
+	}
+}
+
 func TestCallClineAPIFreeStopsOnNonQuotaAPIError(t *testing.T) {
 	oldPool := pool
 	oldConfig := getProxyConfig()
