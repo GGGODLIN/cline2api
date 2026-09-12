@@ -2,6 +2,7 @@
 .cline-credentials.json
 .cline-request-logs.json
 .cline-zen.json
+.cline-config.json
 cline-proxy
 cline-proxy.exe
 cline-proxy.exe~

@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -815,9 +816,9 @@ func handleAdminAccountTest(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// Global proxy config (mutable via API)
+// Global proxy config (mutable via API, persisted to .cline-config.json)
 var (
-	proxyConfig   = defaultProxyConfig()
+	proxyConfig   = loadProxyConfigFromDisk()
 	proxyConfigMu sync.Mutex
 )
 
@@ -843,6 +844,36 @@ func defaultProxyConfig() *proxyConfigData {
 	}
 }
 
+const proxyConfigPath = ".cline-config.json"
+
+// loadProxyConfigFromDisk 启动时加载持久化的代理配置（轮询策略/请求头），
+// 文件不存在或损坏时回退默认值。resolveDataPath 为纯函数，包级初始化安全。
+func loadProxyConfigFromDisk() *proxyConfigData {
+	cfg := defaultProxyConfig()
+	if data, err := os.ReadFile(resolveDataPath(proxyConfigPath)); err == nil {
+		if err := json.Unmarshal(data, cfg); err != nil {
+			log.Printf("proxy config parse failed: %v", err)
+		}
+	}
+	switch cfg.Strategy {
+	case "round_robin", "fill", "random":
+	default:
+		cfg.Strategy = "round_robin"
+	}
+	return cfg
+}
+
+// saveProxyConfigLocked 落盘当前配置（调用方需持有 proxyConfigMu）。
+func saveProxyConfigLocked() {
+	data, err := json.MarshalIndent(proxyConfig, "", "  ")
+	if err != nil {
+		return
+	}
+	if err := os.WriteFile(resolveDataPath(proxyConfigPath), data, 0600); err != nil {
+		log.Printf("proxy config save failed: %v", err)
+	}
+}
+
 func getProxyConfig() *proxyConfigData {
 	proxyConfigMu.Lock()
 	defer proxyConfigMu.Unlock()
@@ -853,6 +884,7 @@ func setProxyConfig(c *proxyConfigData) {
 	proxyConfigMu.Lock()
 	defer proxyConfigMu.Unlock()
 	proxyConfig = c
+	saveProxyConfigLocked()
 }
 
 // GET /admin/api/keys
