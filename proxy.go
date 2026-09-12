@@ -27,6 +27,8 @@ const (
 	freeModelFallback                    = "deepseek/deepseek-v4-flash"
 	freeModelV41Alias                    = "free-v41"
 	freeModelV41                         = "deepseek/deepseek-v4.1-flash"
+	freeModelMuseAlias                   = "free-muse"
+	freeModelMuse                        = "cline-free/muse-spark-1.3-contributor"
 	freeModelInsufficientCreditsCooldown = 24 * time.Hour
 )
 
@@ -685,6 +687,8 @@ func callClineAPI(params map[string]any, stream bool) (*http.Response, *Account,
 		return callFreeClineAPIForModel(params, stream, freeModelFallback)
 	case freeModelV41Alias:
 		return callFreeClineAPIForModel(params, stream, freeModelV41)
+	case freeModelMuseAlias:
+		return callFreeClineAPIForModel(params, stream, freeModelMuse)
 	}
 
 	acc := pickAccountForModel(model)

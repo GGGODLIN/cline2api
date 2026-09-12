@@ -940,6 +940,83 @@ func TestCallClineAPIFreeDSExhaustsOnlyDSPool(t *testing.T) {
 	}
 }
 
+func TestCallClineAPIFreeMuseExhaustsOnlyMusePool(t *testing.T) {
+	oldPool := pool
+	oldConfig := getProxyConfig()
+	oldTransport := httpClient.Transport
+	t.Cleanup(func() {
+		pool = oldPool
+		setProxyConfig(oldConfig)
+		httpClient.Transport = oldTransport
+	})
+
+	first := &Account{
+		AccountID:   "free-muse-one",
+		Email:       "free-muse-one@example.com",
+		AccessToken: "free-muse-one-token",
+		ExpiresAt:   time.Now().Add(time.Hour).UnixMilli(),
+		Status:      "active",
+	}
+	second := &Account{
+		AccountID:   "free-muse-two",
+		Email:       "free-muse-two@example.com",
+		AccessToken: "free-muse-two-token",
+		ExpiresAt:   time.Now().Add(time.Hour).UnixMilli(),
+		Status:      "active",
+	}
+	pool = &AccountPool{Accounts: []*Account{first, second}}
+	config := defaultProxyConfig()
+	config.Strategy = "fill"
+	setProxyConfig(config)
+
+	var attempts []string
+	var models []string
+	httpClient.Transport = freeModelRoundTripper(func(req *http.Request) (*http.Response, error) {
+		token := strings.TrimPrefix(req.Header.Get("Authorization"), "Bearer ")
+		attempts = append(attempts, token)
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			return nil, err
+		}
+		var params map[string]any
+		if err := json.Unmarshal(body, &params); err != nil {
+			return nil, err
+		}
+		model, _ := params["model"].(string)
+		models = append(models, model)
+		return &http.Response{
+			StatusCode: http.StatusTooManyRequests,
+			Body:       io.NopCloser(strings.NewReader(`{"error":"quota","message":"Try again in 1h"}`)),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	})
+
+	params := map[string]any{
+		"model":    freeModelMuseAlias,
+		"messages": []any{map[string]any{"role": "user", "content": "hello"}},
+	}
+	_, _, err := callClineAPI(params, false)
+	if err == nil {
+		t.Fatal("callClineAPI should fail when every muse account is cooling")
+	}
+	if got, want := strings.Join(attempts, ","), "free-muse-one-token,free-muse-two-token"; got != want {
+		t.Fatalf("attempts = %q, want %q", got, want)
+	}
+	if got, want := strings.Join(models, ","), freeModelMuse+","+freeModelMuse; got != want {
+		t.Fatalf("models = %q, want %q", got, want)
+	}
+	if got, want := params["model"], freeModelMuse; got != want {
+		t.Fatalf("effective model = %v, want %q", got, want)
+	}
+	if _, cooling := first.ModelCooldowns[freeModelMuse]; !cooling {
+		t.Fatal("first account should be cooling down for the muse model")
+	}
+	if _, cooling := first.ModelCooldowns[freeModelPrimary]; cooling {
+		t.Fatal("muse exhaustion must not cool down the GLM pool")
+	}
+}
+
 func TestCallClineAPIFreeUsesOnlyGLMThenDS(t *testing.T) {
 	oldPool := pool
 	oldConfig := getProxyConfig()
