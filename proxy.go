@@ -38,7 +38,7 @@ var freeModelChain = []string{freeModelPrimary, freeModelFallback}
 // 同步 Cline 官方推荐模型成功后，getAllModels 以远程模型为主。
 var builtinModels = []Model{
 	{ID: "z-ai/glm-5.3-flash", Provider: "z-ai", Cost: "free", Status: "active", Custom: false},
-	{ID: "cline-free/longcat-2.0", Provider: "cline-free", Cost: "free", Status: "active", Custom: false},
+	{ID: freeModelMuse, Provider: "cline-free", Cost: "free", Status: "active", Custom: false},
 	{ID: "cline-pass/glm-5.2", Provider: "zai", Cost: "pass", Status: "active", Custom: false},
 	{ID: "cline-pass/deepseek-v4-flash", Provider: "deepseek", Cost: "pass", Status: "active", Custom: false},
 	{ID: "cline-pass/qwen3.7-max", Provider: "qwen", Cost: "pass", Status: "active", Custom: false},

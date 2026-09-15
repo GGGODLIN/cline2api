@@ -858,15 +858,15 @@ func TestOfflineModelsRetainLongcatBuiltinWithoutFreeFallback(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
 		t.Fatalf("decode models response: %v", err)
 	}
-	foundLongcat := false
+	foundMuse := false
 	for _, model := range payload.Data {
-		if model.ID == "cline-free/longcat-2.0" {
-			foundLongcat = true
+		if model.ID == freeModelMuse {
+			foundMuse = true
 			break
 		}
 	}
-	if !foundLongcat {
-		t.Fatal("offline models should retain cline-free/longcat-2.0")
+	if !foundMuse {
+		t.Fatalf("offline models should retain %s", freeModelMuse)
 	}
 	if got, want := strings.Join(freeModelChain, ","), freeModelPrimary+","+freeModelFallback; got != want {
 		t.Fatalf("free model chain = %q, want %q", got, want)
