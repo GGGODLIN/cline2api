@@ -1117,7 +1117,7 @@ func TestCallClineAPIFreeV41RetriesNextAccountAfterInsufficientCredits(t *testin
 	config.Strategy = "fill"
 	setProxyConfig(config)
 
-	const upstreamModel = "deepseek/deepseek-v4.1-flash"
+	const upstreamModel = freeModelV41
 	var attempts []string
 	var models []string
 	httpClient.Transport = freeModelRoundTripper(func(req *http.Request) (*http.Response, error) {

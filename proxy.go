@@ -26,7 +26,7 @@ const (
 	freeModelPrimary                     = "z-ai/glm-5.3-flash"
 	freeModelFallback                    = "deepseek/deepseek-v4-flash"
 	freeModelV41Alias                    = "free-v41"
-	freeModelV41                         = "deepseek/deepseek-v4.1-flash"
+	freeModelV41                         = "cline-free/deepseek-v4.1-flash"
 	freeModelMuseAlias                   = "free-muse"
 	freeModelMuse                        = "cline-free/muse-spark-1.3-contributor"
 	freeModelInsufficientCreditsCooldown = 24 * time.Hour
