@@ -1315,3 +1315,117 @@ func TestCallClineAPIFreeStopsOnNonQuotaAPIError(t *testing.T) {
 		t.Fatalf("effective model = %v, want %q", got, want)
 	}
 }
+
+func TestBuildUpstreamBodyNormalizesMuseMaxEffort(t *testing.T) {
+	for _, key := range []string{"reasoning_effort", "reasoningEffort"} {
+		t.Run(key, func(t *testing.T) {
+			body := buildUpstreamBody(map[string]any{
+				"model": freeModelMuse,
+				key:     "max",
+			}, false)
+			if got, want := body["reasoning_effort"], defaultReasoningEffort; got != want {
+				t.Fatalf("reasoning_effort = %v, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestBuildUpstreamBodyPreservesMaxEffortForOtherModels(t *testing.T) {
+	body := buildUpstreamBody(map[string]any{
+		"model":            freeModelPrimary,
+		"reasoning_effort": "max",
+	}, false)
+	if got, want := body["reasoning_effort"], "max"; got != want {
+		t.Fatalf("reasoning_effort = %v, want %q", got, want)
+	}
+}
+
+func isolateRequestLogs(t *testing.T) {
+	t.Helper()
+	oldPath := requestLogsPath
+	requestLogsMu.Lock()
+	oldLogs := requestLogs
+	requestLogs = nil
+	requestLogsPath = t.TempDir() + "/request-logs.json"
+	requestLogsMu.Unlock()
+	t.Cleanup(func() {
+		requestLogsMu.Lock()
+		requestLogs = oldLogs
+		requestLogsPath = oldPath
+		requestLogsMu.Unlock()
+	})
+}
+
+func TestHandleStreamResponseMarksSSEErrorIncomplete(t *testing.T) {
+	isolateRequestLogs(t)
+	recorder := httptest.NewRecorder()
+	upstream := &http.Response{
+		StatusCode: http.StatusOK,
+		Body: io.NopCloser(strings.NewReader(
+			"data: {\"error\":{\"code\":\"stream_initialization_failed\",\"message\":\"invalid effort\"}}\n\n",
+		)),
+	}
+	reqLog := RequestLog{ID: "openai-sse-error", Model: freeModelMuse, StartedAt: time.Now()}
+
+	handleStreamResponse(recorder, upstream, nil, &reqLog)
+
+	if reqLog.Completed {
+		t.Fatal("SSE error should not be marked completed")
+	}
+	if !strings.Contains(reqLog.Error, "stream_initialization_failed") {
+		t.Fatalf("request log error = %q", reqLog.Error)
+	}
+	if !strings.Contains(recorder.Body.String(), "stream_initialization_failed") {
+		t.Fatalf("response body = %q", recorder.Body.String())
+	}
+}
+
+func TestHandleStreamResponseIgnoresNullErrorField(t *testing.T) {
+	isolateRequestLogs(t)
+	recorder := httptest.NewRecorder()
+	upstream := &http.Response{
+		StatusCode: http.StatusOK,
+		Body: io.NopCloser(strings.NewReader(
+			"data: {\"error\":null,\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n" +
+				"data: {\"choices\":[{\"delta\":{\"content\":\" there\"}}]}\n\n",
+		)),
+	}
+	reqLog := RequestLog{ID: "openai-null-error", Model: freeModelMuse, StartedAt: time.Now()}
+
+	handleStreamResponse(recorder, upstream, nil, &reqLog)
+
+	if !reqLog.Completed {
+		t.Fatalf("normal stream should be completed: %q", reqLog.Error)
+	}
+	if !strings.Contains(recorder.Body.String(), " there") {
+		t.Fatalf("response body = %q", recorder.Body.String())
+	}
+}
+
+func TestHandleAnthropicStreamMarksSSEErrorIncomplete(t *testing.T) {
+	isolateRequestLogs(t)
+	recorder := httptest.NewRecorder()
+	upstream := &http.Response{
+		StatusCode: http.StatusOK,
+		Body: io.NopCloser(strings.NewReader(
+			"data: {\"error\":{\"code\":\"stream_initialization_failed\",\"message\":\"invalid effort\"}}\n\n",
+		)),
+	}
+	reqLog := RequestLog{ID: "anthropic-sse-error", Model: freeModelMuse, StartedAt: time.Now()}
+
+	handleAnthropicStream(recorder, upstream, nil, &reqLog)
+
+	if reqLog.Completed {
+		t.Fatal("SSE error should not be marked completed")
+	}
+	if !strings.Contains(reqLog.Error, "stream_initialization_failed") {
+		t.Fatalf("request log error = %q", reqLog.Error)
+	}
+	body := recorder.Body.String()
+	if !strings.Contains(body, "event: error") {
+		t.Fatalf("response body = %q", body)
+	}
+	if strings.Contains(body, "event: message_stop") {
+		t.Fatalf("error stream should not emit message_stop: %q", body)
+	}
+}

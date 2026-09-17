@@ -602,6 +602,9 @@ func buildUpstreamBody(params map[string]any, stream bool) map[string]any {
 	} else if re, ok := params["reasoningEffort"].(string); ok && re != "" {
 		body["reasoning_effort"] = re
 	}
+	if model == freeModelMuse && body["reasoning_effort"] == "max" {
+		body["reasoning_effort"] = defaultReasoningEffort
+	}
 
 	for _, key := range passThroughKeys {
 		if val, ok := params[key]; ok {
@@ -1179,6 +1182,7 @@ func handleStreamResponse(w http.ResponseWriter, upstream *http.Response, acc *A
 	reader := bufio.NewReader(upstream.Body)
 	var latestUsage tokenUsage
 	var firstOutputAt time.Time
+	var streamErr string
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil {
@@ -1215,6 +1219,14 @@ func handleStreamResponse(w http.ResponseWriter, upstream *http.Response, acc *A
 					}
 				}
 				normalized := normalizeOpenAIResponse(obj)
+				if errMsg := streamErrorMessage(normalized); errMsg != "" {
+					streamErr = errMsg
+					if normBytes, err := json.Marshal(normalized); err == nil {
+						w.Write([]byte("data: " + string(normBytes) + "\n\n"))
+						flusher.Flush()
+					}
+					break
+				}
 				if usage := parseTokenUsage(normalized["usage"]); usage.Valid {
 					latestUsage = mergeTokenUsage(latestUsage, usage)
 				}
@@ -1232,8 +1244,45 @@ func handleStreamResponse(w http.ResponseWriter, upstream *http.Response, acc *A
 		w.Write([]byte(line + "\n"))
 		flusher.Flush()
 	}
+	if streamErr != "" {
+		finalizeRequestLog(reqLog, latestUsage, firstOutputAt, reqLog.StartedAt, false, "upstream SSE error: "+streamErr)
+		return
+	}
 	recordTokenUsage(acc, reqLog.Model, latestUsage)
 	finalizeRequestLog(reqLog, latestUsage, firstOutputAt, reqLog.StartedAt, true, "")
+}
+
+func streamErrorMessage(obj map[string]any) string {
+	errPayload, ok := obj["error"]
+	if !ok {
+		if data, dataOK := obj["data"].(map[string]any); dataOK {
+			errPayload, ok = data["error"]
+		}
+	}
+	if !ok {
+		return ""
+	}
+	switch value := errPayload.(type) {
+	case nil:
+		return ""
+	case string:
+		if strings.TrimSpace(value) == "" {
+			return ""
+		}
+	case map[string]any:
+		if len(value) == 0 {
+			return ""
+		}
+	case []any:
+		if len(value) == 0 {
+			return ""
+		}
+	}
+	raw, err := json.Marshal(errPayload)
+	if err != nil {
+		return "upstream SSE error"
+	}
+	return string(raw)
 }
 
 func hasFirstOutput(obj map[string]any) bool {
@@ -1798,6 +1847,7 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 	reader := bufio.NewReader(upstream.Body)
 	var latestUsage tokenUsage
 	var firstOutputAt time.Time
+	var streamErr string
 
 	for {
 		line, err := reader.ReadString('\n')
@@ -1829,10 +1879,9 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 			firstOutputAt = time.Now()
 		}
 
-		// Detect upstream SSE error
 		if errPayload, ok := obj["error"]; ok {
-			errBody, _ := json.Marshal(errPayload)
-			log.Printf("  upstream SSE error: %s", string(errBody))
+			streamErr = streamErrorMessage(obj)
+			log.Printf("  upstream SSE error: %s", streamErr)
 			emit("error", map[string]any{"type": "error", "error": errPayload})
 			break
 		}
@@ -1917,6 +1966,11 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 				stopReason = "tool_use"
 			}
 		}
+	}
+
+	if streamErr != "" {
+		finalizeRequestLog(reqLog, latestUsage, firstOutputAt, reqLog.StartedAt, false, "upstream SSE error: "+streamErr)
+		return
 	}
 
 	// Stop text block if active
