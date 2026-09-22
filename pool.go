@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -100,6 +101,41 @@ func addAccount(acc *Account) {
 	p.Accounts = append(p.Accounts, acc)
 	poolMu.Unlock()
 	savePool()
+}
+
+// findAccountByRefreshToken 按 refreshToken 查找已有账号（不存在返回 nil）。
+// 用于导入时的去重：同一个 refreshToken 只应存在一个账号。
+func findAccountByRefreshToken(refreshToken string) *Account {
+	refreshToken = strings.TrimSpace(refreshToken)
+	if refreshToken == "" {
+		return nil
+	}
+	p := loadPool()
+	poolMu.Lock()
+	defer poolMu.Unlock()
+
+	for _, a := range p.Accounts {
+		if strings.TrimSpace(a.RefreshToken) == refreshToken {
+			return a
+		}
+	}
+	return nil
+}
+
+// accountExists 判断该 refreshToken 是否已在账号池中。
+func accountExists(refreshToken string) bool {
+	return findAccountByRefreshToken(refreshToken) != nil
+}
+
+// isDuplicateImportToken 判断待导入的 refreshToken 是否应跳过（导入去重）：
+// 账号池中已存在同一 refreshToken，或本批次内已处理过（seen）。
+// seen 由调用方维护、在此更新，用于同一批次内的去重。
+func isDuplicateImportToken(refreshToken string, seen map[string]bool) bool {
+	if seen[refreshToken] || accountExists(refreshToken) {
+		return true
+	}
+	seen[refreshToken] = true
+	return false
 }
 
 func removeAccount(accountID string) bool {

@@ -310,6 +310,21 @@ func handleAdminAccountAdd(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+	// 去重：该 refreshToken 已存在时直接返回，不重复添加
+	if existing := findAccountByRefreshToken(req.RefreshToken); existing != nil {
+		writeAPI(w, http.StatusOK, apiResponse{
+			Success: true,
+			Message: tAPI(r, "account_exists", existing.Email),
+			Data: map[string]any{
+				"accountId": existing.AccountID,
+				"email":     existing.Email,
+				"status":    existing.Status,
+				"duplicate": true,
+			},
+		})
+		return
+	}
+
 		// Validate by refreshing
 		resp, err := refreshClineToken(req.RefreshToken)
 		if err != nil {
@@ -542,7 +557,9 @@ func handleSSOImport(w http.ResponseWriter, r *http.Request) {
 	// SSO cookie format expected: workos_session=xxx or similar
 	lines := strings.Split(req.SSOCookies, "\n")
 	imported := 0
+	duplicates := 0
 	errors := []string{}
+	seen := make(map[string]bool)
 
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
@@ -551,7 +568,15 @@ func handleSSOImport(w http.ResponseWriter, r *http.Request) {
 		}
 		// Try to use the cookie as a refresh token directly (common format)
 		if strings.HasPrefix(line, "workos:") || len(line) > 20 {
-			token := strings.TrimPrefix(line, "workos:")
+			token := strings.TrimSpace(strings.TrimPrefix(line, "workos:"))
+			if token == "" {
+				continue
+			}
+			// 去重：与账号池中已有账号或本批次内重复的 token，跳过而不是重复添加
+			if isDuplicateImportToken(token, seen) {
+				duplicates++
+				continue
+			}
 			resp, err := refreshClineToken(token)
 			if err != nil {
 				errors = append(errors, fmt.Sprintf("token %s...: %v", truncate(token, 16), err))
@@ -577,8 +602,9 @@ func handleSSOImport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	result := map[string]any{
-		"imported": imported,
-		"failed":   len(errors),
+		"imported":   imported,
+		"failed":     len(errors),
+		"duplicates": duplicates,
 	}
 	if len(errors) > 0 {
 		result["errors"] = errors
@@ -586,7 +612,7 @@ func handleSSOImport(w http.ResponseWriter, r *http.Request) {
 
 		writeAPI(w, http.StatusOK, apiResponse{
 			Success: true,
-			Message: tAPI(r, "imported_accounts", imported, len(errors)),
+			Message: tAPI(r, "imported_accounts", imported, len(errors), duplicates),
 			Data:    result,
 		})
 }
@@ -621,13 +647,21 @@ func handleBatchImport(w http.ResponseWriter, r *http.Request) {
 		}
 
 	imported := 0
+	duplicates := 0
 	errors := []string{}
+	seen := make(map[string]bool)
 
 	for _, t := range req.Tokens {
-		if t.RefreshToken == "" {
+		token := strings.TrimSpace(t.RefreshToken)
+		if token == "" {
 			continue
 		}
-		resp, err := refreshClineToken(t.RefreshToken)
+		// 去重：与账号池中已有账号或本批次内重复的 token，跳过而不是重复添加
+		if isDuplicateImportToken(token, seen) {
+			duplicates++
+			continue
+		}
+		resp, err := refreshClineToken(token)
 		if err != nil {
 			errors = append(errors, fmt.Sprintf("%s: %v", t.Email, err))
 			continue
@@ -639,7 +673,7 @@ func handleBatchImport(w http.ResponseWriter, r *http.Request) {
 		acc := &Account{
 			AccountID:    fmt.Sprintf("acc_%d", time.Now().UnixMilli()),
 			Email:        email,
-			RefreshToken: t.RefreshToken,
+			RefreshToken: token,
 			AccessToken:  "workos:" + resp.Data.AccessToken,
 			ExpiresAt:    parseExpiry(resp.Data.ExpiresAt) - 60000,
 			Status:       "active",
@@ -651,11 +685,12 @@ func handleBatchImport(w http.ResponseWriter, r *http.Request) {
 
 		writeAPI(w, http.StatusOK, apiResponse{
 			Success: true,
-			Message: tAPI(r, "imported_accounts", imported, len(errors)),
+			Message: tAPI(r, "imported_accounts", imported, len(errors), duplicates),
 		Data: map[string]any{
-			"imported": imported,
-			"failed":   len(errors),
-			"errors":   errors,
+			"imported":   imported,
+			"failed":     len(errors),
+			"duplicates": duplicates,
+			"errors":     errors,
 		},
 	})
 }

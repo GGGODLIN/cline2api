@@ -1876,24 +1876,35 @@ async function exportAccounts() {
 
 // ========== 批量导入 ==========
 // 解析导入数据：支持导出格式 {tokens:[...]}、JSON 数组 [...]、单行一个 token 的纯文本
+// 解析后按 refreshToken 去重，避免同一账号被重复导入
 function parseImportData(text) {
   let parsed;
   try {
     parsed = JSON.parse(text);
   } catch {
     // 纯文本：每行一个 refreshToken
-    return text.split('\n').filter(t => t.trim()).map(t => ({ refreshToken: t.trim() }));
+    parsed = text.split('\n').filter(t => t.trim()).map(t => ({ refreshToken: t.trim() }));
   }
+  let list;
   // 导出格式 {tokens:[...], exportedAt:...}
   if (parsed && !Array.isArray(parsed) && Array.isArray(parsed.tokens)) {
-    return parsed.tokens;
-  }
+    list = parsed.tokens;
   // JSON 数组
-  if (Array.isArray(parsed)) {
-    return parsed;
-  }
+  } else if (Array.isArray(parsed)) {
+    list = parsed;
   // 单个对象
-  return [parsed];
+  } else {
+    list = [parsed];
+  }
+  const seen = new Set();
+  return list
+    .map(item => (item && typeof item === 'object') ? item : { refreshToken: String(item || '').trim() })
+    .filter(item => {
+      const tok = (item.refreshToken || '').trim();
+      if (!tok || seen.has(tok)) return false;
+      seen.add(tok);
+      return true;
+    });
 }
 
 async function batchImport() {
@@ -1915,7 +1926,8 @@ async function handleFileImport(event) {
   const tokens = parseImportData(text);
   try {
     const d = await api('POST', '/batch-import', { tokens });
-    toast(d.message || t('导入了 ') + tokens.length + t(' 个账号'), 'success');
+    const imported = (d.data && typeof d.data.imported === 'number') ? d.data.imported : tokens.length;
+    toast(d.message || t('导入了 ') + imported + t(' 个账号'), 'success');
     loadAccounts(); loadStats();
   } catch (e) { toast(t('导入失败: ') + e.message, 'error'); }
   event.target.value = '';
