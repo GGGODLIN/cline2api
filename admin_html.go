@@ -348,7 +348,7 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
       <span id="footerVersion" style="font-size:11px;opacity:0.7">dev</span>
     </div>
     <div style="margin-bottom:4px">API: <span id="footerApiAddr">127.0.0.1:3457</span></div>
-    <div><a href="#" onclick="openExternal('https://github.com/dhananjaym182/cline2api');return false">GitHub</a> · <a href="#" onclick="openExternal('https://github.com/dhananjaym182/cline2api/issues');return false">反馈</a> · MIT</div>
+    <div><a href="#" onclick="openExternal('https://github.com/luawei1/cline2api');return false">GitHub</a> · <a href="#" onclick="openExternal('https://github.com/luawei1/cline2api/issues');return false">反馈</a> · MIT</div>
   </div>
   <div class="sidebar-lang">
     <div class="lang-switch">
@@ -942,10 +942,10 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
     <div class="section-title">项目链接</div>
     <div class="section-body">
       <div style="display:flex;flex-direction:column;gap:10px;font-size:14px">
-        <div><span style="color:var(--text3);display:inline-block;width:80px">仓库地址</span><a href="#" onclick="openExternal('https://github.com/dhananjaym182/cline2api');return false" style="color:var(--accent);cursor:pointer">github.com/dhananjaym182/cline2api</a></div>
-        <div><span style="color:var(--text3);display:inline-block;width:80px">问题反馈</span><a href="#" onclick="openExternal('https://github.com/dhananjaym182/cline2api/issues');return false" style="color:var(--accent);cursor:pointer">github.com/dhananjaym182/cline2api/issues</a></div>
-        <div><span style="color:var(--text3);display:inline-block;width:80px">下载更新</span><a href="#" onclick="openExternal('https://github.com/dhananjaym182/cline2api/releases');return false" style="color:var(--accent);cursor:pointer">github.com/dhananjaym182/cline2api/releases</a></div>
-        <div><span style="color:var(--text3);display:inline-block;width:80px">开源协议</span>MIT License © 2026 dhananjaym182</div>
+        <div><span style="color:var(--text3);display:inline-block;width:80px">仓库地址</span><a href="#" onclick="openExternal('https://github.com/luawei1/cline2api');return false" style="color:var(--accent);cursor:pointer">github.com/luawei1/cline2api</a></div>
+        <div><span style="color:var(--text3);display:inline-block;width:80px">问题反馈</span><a href="#" onclick="openExternal('https://github.com/luawei1/cline2api/issues');return false" style="color:var(--accent);cursor:pointer">github.com/luawei1/cline2api/issues</a></div>
+        <div><span style="color:var(--text3);display:inline-block;width:80px">下载更新</span><a href="#" onclick="openExternal('https://github.com/luawei1/cline2api/releases');return false" style="color:var(--accent);cursor:pointer">github.com/luawei1/cline2api/releases</a></div>
+        <div><span style="color:var(--text3);display:inline-block;width:80px">开源协议</span>MIT License © 2026 luawei1</div>
       </div>
     </div>
   </div>
