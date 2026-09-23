@@ -1216,6 +1216,11 @@ const I18N = {
   '移除模型': 'Removed models',
   '模型无变化': 'No model changes',
   '模型列表已更新': 'Model list updated',
+  '上下文窗口 / 最大输出 (token)，点击⚙修改': 'Context window / max output (tokens), click ⚙ to edit',
+  '上下文窗口 (token)': 'Context window (tokens)',
+  '最大输出 (token)': 'Max output (tokens)',
+  '已保存': 'Saved',
+  '保存失败': 'Save failed',
   '同步中...': 'Syncing...',
   '暂无模型': 'No models',
   '模型统计': 'Model Usage',
@@ -2281,10 +2286,35 @@ function isOcModel(m) { return m.source === 'zen' || m.provider === 'opencode'; 
 
 function renderModelChip(m) {
   let item = '<span class="model-tag ' + (m.cost || 'free') + '">' + esc(m.id) + '</span>';
+  if (m.context) {
+    item += '<span style="font-size:11px;color:var(--text3);margin-left:4px" title="' + t('上下文窗口 / 最大输出 (token)，点击⚙修改') + '">ctx ' + fmtTokens(m.context) + '</span>';
+  }
+  if (isOcModel(m) || m.custom) {
+    item += '<button class="btn btn-sm" style="padding:2px 6px" onclick="editModelMeta(\'' + esc(m.id) + '\',' + (m.context || 0) + ',' + (m.output || 0) + ')" title="' + t('上下文窗口 / 最大输出 (token)，点击⚙修改') + '">⚙</button>';
+  }
   if (m.custom) {
     item += '<button class="btn btn-sm btn-danger" style="padding:2px 6px" onclick="deleteModel(\'' + esc(m.id) + '\')" title="' + t('删除') + '">✕</button>';
   }
   return '<span class="model-item">' + item + '</span>';
+}
+
+function fmtTokens(n) {
+  if (n >= 1000000) return (n / 1000000).toFixed(n % 1000000 ? 1 : 0) + 'M';
+  if (n >= 1000) return Math.round(n / 1000) + 'K';
+  return String(n);
+}
+
+// 修改模型上下文/最大输出：压缩阈值按此计算，设置后 zen 同步保留该值
+async function editModelMeta(id, ctx, out) {
+  const c = prompt(t('上下文窗口 (token)') + ' - ' + id, ctx || 200000);
+  if (c === null) return;
+  const o = prompt(t('最大输出 (token)'), out || 32768);
+  if (o === null) return;
+  try {
+    await api('POST', '/models/context', { id: id, context: parseInt(c, 10) || 0, output: parseInt(o, 10) || 0 });
+    toast(t('已保存') + ': ' + id + ' ctx=' + fmtTokens(parseInt(c, 10) || 0), 'success');
+    await loadModels();
+  } catch (e) { toast(t('保存失败') + ': ' + e.message, 'error'); }
 }
 
 // 模型分组渲染：opencode / Cline 分类，付费模型默认折叠，点击组头展开

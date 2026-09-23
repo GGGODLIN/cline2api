@@ -77,17 +77,20 @@ type zenSeedModel struct {
 	Output  int
 }
 
+// zenSeedModels 种子表三用途：离线 fallback、免费判定白名单、别名解析。
+// Context 默认 1M（2026-09 主流模型普遍 1M 上下文；压缩阈值按此计算，
+// 偏小会让压缩过早触发——曾导致 200K 默认值把 1M 模型压到几万 token）。
 var zenSeedModels = []zenSeedModel{
-	{ID: "deepseek-v4-flash-free", Aliases: []string{"deepseek-v4-flash", "deepseek-v4"}, Context: 200000, Output: 128000},
-	{ID: "mimo-v2.6-flash-free", Aliases: []string{"mimo-v2.6-flash", "mimo-v2.6", "mimo"}, Context: 200000, Output: 32000},
-	{ID: "mimo-v2.5-free", Aliases: []string{"mimo-v2.5"}, Context: 200000, Output: 32000},
-	{ID: "ling-3.0-flash-fin-free", Aliases: []string{"ling-3.0-flash", "ling"}, Context: 200000, Output: 32768},
+	{ID: "deepseek-v4-flash-free", Aliases: []string{"deepseek-v4-flash", "deepseek-v4"}, Context: 1000000, Output: 128000},
+	{ID: "mimo-v2.6-flash-free", Aliases: []string{"mimo-v2.6-flash", "mimo-v2.6", "mimo"}, Context: 1000000, Output: 32000},
+	{ID: "mimo-v2.5-free", Aliases: []string{"mimo-v2.5"}, Context: 1000000, Output: 32000},
+	{ID: "ling-3.0-flash-fin-free", Aliases: []string{"ling-3.0-flash", "ling"}, Context: 1000000, Output: 32768},
 	{ID: "nemotron-3-ultra-free", Aliases: []string{"nemotron-3-ultra", "nemotron"}, Context: 1000000, Output: 128000},
-	{ID: "nemotron-3.5-lightning-free", Aliases: []string{"nemotron-3.5-lightning"}, Context: 200000, Output: 32768},
-	{ID: "jev-1.13-free", Context: 200000, Output: 32768},
-	{ID: "muse-spark-1.3-contributor-free", Context: 200000, Output: 32768},
-	{ID: "muse-spark-1.2-contributor-free", Context: 200000, Output: 32768},
-	{ID: "big-pickle", Context: 200000, Output: 32000},
+	{ID: "nemotron-3.5-lightning-free", Aliases: []string{"nemotron-3.5-lightning"}, Context: 1000000, Output: 32768},
+	{ID: "jev-1.13-free", Context: 1000000, Output: 32768},
+	{ID: "muse-spark-1.3-contributor-free", Context: 1000000, Output: 32768},
+	{ID: "muse-spark-1.2-contributor-free", Context: 1000000, Output: 32768},
+	{ID: "big-pickle", Context: 1000000, Output: 32000},
 }
 
 // builtinZenModels 把种子表转成 Model 条目（离线 fallback 用，Source="seed"）。
@@ -1119,8 +1122,22 @@ func syncZenModels() modelSyncResult {
 		return fail(fmt.Errorf("models API returned empty list"))
 	}
 
-	// 补全上下文信息：远程接口不带 context/output，优先沿用种子表/旧值
+	// 补全上下文信息：远程接口不带 context/output。
+	// 用户在管理页锁定过的条目（MetaLocked）保留原值；
+	// 其余按种子表刷新（种子值更新时旧条目自动跟进），新模型回退默认。
+	p := loadPool()
+	oldZen := make(map[string]Model, len(p.Models))
+	for _, m := range p.Models {
+		if m.Source == "zen" {
+			oldZen[m.ID] = m
+		}
+	}
 	fillMeta := func(m Model) Model {
+		if om, ok := oldZen[m.ID]; ok && om.MetaLocked && om.Context > 0 {
+			m.Context, m.Output = om.Context, om.Output
+			m.MetaLocked = true
+			return m
+		}
 		for _, sm := range zenSeedModels {
 			if sm.ID == m.ID {
 				m.Context, m.Output = sm.Context, sm.Output
@@ -1128,7 +1145,7 @@ func syncZenModels() modelSyncResult {
 			}
 		}
 		if m.Context == 0 {
-			m.Context = 200000
+			m.Context = 1000000
 		}
 		if m.Output == 0 {
 			m.Output = 32768
@@ -1139,7 +1156,6 @@ func syncZenModels() modelSyncResult {
 		remote[i] = fillMeta(remote[i])
 	}
 
-	p := loadPool()
 	poolMu.Lock()
 	oldIDs := make(map[string]bool)
 	var kept []Model

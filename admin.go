@@ -88,6 +88,7 @@ func registerAdminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/admin/api/opencode/models/sync", auth(handleOpenCodeModelSync))
 	mux.HandleFunc("/admin/api/models/add", auth(handleAdminModelAdd))
 	mux.HandleFunc("/admin/api/models/delete", auth(handleAdminModelDelete))
+	mux.HandleFunc("/admin/api/models/context", auth(handleAdminModelContext))
 	mux.HandleFunc("/admin/api/config", auth(handleAdminConfig))
 	mux.HandleFunc("/admin/api/config/update", auth(handleAdminUpdateConfig))
 	mux.HandleFunc("/admin/api/providers", auth(handleProvidersList))
@@ -1284,6 +1285,62 @@ func handleAdminModelDelete(w http.ResponseWriter, r *http.Request) {
 	savePool()
 
 		writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: tAPI(r, "model_deleted")})
+}
+
+// POST /admin/api/models/context  body: { id, context, output }
+// 手动设置模型的上下文窗口 / 最大输出 token（压缩阈值与 maybeCompact 按此计算）。
+// 0 = 清除为未知（zen 同步会回填默认值）。设置后 zen 模型同步保留该值不再覆盖。
+func handleAdminModelContext(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
+		return
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: err.Error()})
+		return
+	}
+	defer r.Body.Close()
+
+	var req struct {
+		ID      string `json:"id"`
+		Context int    `json:"context"`
+		Output  int    `json:"output"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "invalid_json")})
+		return
+	}
+	if req.ID == "" {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "model_id_required")})
+		return
+	}
+	if req.Context < 0 || req.Output < 0 {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "invalid_json")})
+		return
+	}
+
+	p := loadPool()
+	poolMu.Lock()
+	found := false
+	for i, m := range p.Models {
+		if m.ID == req.ID {
+			p.Models[i].Context = req.Context
+			p.Models[i].Output = req.Output
+			// 双清零=回到未知（同步回填默认）；否则视为用户锁定，同步不再覆盖
+			p.Models[i].MetaLocked = !(req.Context == 0 && req.Output == 0)
+			found = true
+			break
+		}
+	}
+	poolMu.Unlock()
+	if !found {
+		writeAPI(w, http.StatusNotFound, apiResponse{Error: tAPI(r, "model_not_found")})
+		return
+	}
+	savePool()
+	log.Printf("  model context updated: %s ctx=%d out=%d", req.ID, req.Context, req.Output)
+	writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: tAPI(r, "model_context_saved")})
 }
 
 // GET /admin/api/stats
