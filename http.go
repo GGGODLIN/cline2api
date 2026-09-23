@@ -14,8 +14,11 @@ import (
 
 var execCommand = exec.Command
 
+// 全局出站 transport：经 cline_proxy.go 的钩子支持应用内出口代理池
+// （Cline 对话/认证/模型同步与复用此 transport 的自定义 Provider 共同生效）。
 var httpTransport = &http.Transport{
-	Proxy:               http.ProxyFromEnvironment,
+	Proxy:               clineOutboundProxy,
+	DialContext:         clineDialContext,
 	MaxIdleConns:        100,
 	MaxIdleConnsPerHost: 10,
 	IdleConnTimeout:     90 * time.Second,

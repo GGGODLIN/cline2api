@@ -120,6 +120,15 @@ CLINE_PROXY_HOST=0.0.0.0 ./cline-proxy
 
 > ⚠️ **Security warning**: `/admin/` has no auth (unless you set a password). Listening on a non-loopback address (e.g. `0.0.0.0`) exposes it to your LAN. Only do this on a trusted network, or restrict port `3457` in your firewall.
 
+### 6. Egress proxy (cross-region restrictions)
+
+Direct requests to the Cline upstream (`api.cline.bot` / `api.workos.com`) may be region-restricted from mainland China. Configure an **application-level egress proxy** in the admin panel without enabling TUN mode on the host:
+
+- **Cline egress proxy**: open **Upstreams → Cline Egress Proxies**, enter one proxy URL per line (`http`, `https`, `socks5`, or `socks5h`; for example `socks5://127.0.0.1:1080`). Cline requests (chat, login/token refresh, and model sync) use the configured pool with round-robin, random, or fill strategy. The setting is stored in `.cline-proxy.json` and takes effect immediately.
+- **OpenCode egress proxy**: the OpenCode Zen section has a separate proxy pool for the opencode upstream and automatically cools down rate-limited exits.
+
+Priority: application proxy > environment proxy (`HTTPS_PROXY`) > direct connection. Loopback and private-network targets (such as a local Ollama or custom Provider) always connect directly.
+
 ## Build
 
 ### Desktop app (single-file, cross-platform)
@@ -165,6 +174,8 @@ Files are looked up in this order: executable directory → working directory �
 |------|---------|
 | `.cline-accounts.json` | Account pool, API keys, custom models and default model |
 | `.cline-request-logs.json` | Request logs |
+| `.cline-proxy.json` | Cline egress proxy pool configuration |
+| `.cline-zen.json` | OpenCode (Zen) configuration, including its egress proxy pool |
 | `override.md` | System Prompt override (optional) |
 
 > ⚠️ The account file contains plaintext refreshTokens — treat it as sensitive. Never ship it in a release package or commit it to Git.
