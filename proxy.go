@@ -29,6 +29,10 @@ const (
 	freeModelLastResort    = "cline-free/longcat-2.0"
 )
 
+// minUpstreamMaxTokens 上游对输出 token 的硬下限：Cline 免费模型经 OpenRouter
+// 转发时（如 meta/muse-spark），max_output_tokens < 16 会被上游直接 400。
+const minUpstreamMaxTokens = 16
+
 // freeModelChain 是 model="free" 时的降级顺序。
 // 顺序依据 Artificial Analysis Intelligence Index v4.1.1：
 // glm-5.3-flash 57 > deepseek-v4-flash 0731 52 > longcat-2.0 34。
@@ -692,10 +696,19 @@ func buildUpstreamBody(params map[string]any, stream bool) map[string]any {
 	sessionID := fmt.Sprintf("sess_%d", time.Now().UnixMilli())
 
 	maxTokens := defaultMaxTokens
+	source := ""
 	if mt, ok := params["max_tokens"].(float64); ok {
-		maxTokens = int(mt)
+		maxTokens, source = int(mt), "max_tokens"
 	} else if mt, ok := params["max_completion_tokens"].(float64); ok {
-		maxTokens = int(mt)
+		maxTokens, source = int(mt), "max_completion_tokens"
+	}
+	// 客户端发的 0 视为未设置、1~15 低于上游硬下限：一律兜到默认值，
+	// 否则 muse-spark 等模型直接 400 且错误会被回退链吞掉
+	if maxTokens < minUpstreamMaxTokens {
+		if source != "" {
+			log.Printf("  clamp %s=%d -> %d (upstream requires >= %d)", source, maxTokens, defaultMaxTokens, minUpstreamMaxTokens)
+		}
+		maxTokens = defaultMaxTokens
 	}
 
 	model := getDefaultModel()
