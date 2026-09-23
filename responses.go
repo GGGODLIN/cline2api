@@ -578,6 +578,9 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 		upResp, acc, err := callClineAPI(chat, isStream)
 		if effectiveModel, ok := chat["model"].(string); ok && effectiveModel != "" {
 			reqLog.Model = effectiveModel // 含回退后的实际服务模型
+			if _, isZen := resolveZenInfo(effectiveModel); isZen {
+				reqLog.Upstream = upstreamOpenCode // zen 反向故障转移后归因 opencode
+			}
 		}
 		if err != nil {
 			log.Printf("  responses api error: %v", err)

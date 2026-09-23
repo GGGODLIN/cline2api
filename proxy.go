@@ -462,6 +462,9 @@ func startProxy(host string, port int) error {
 		resp, acc, err := callClineAPI(params, isStream)
 		if effectiveModel, ok := params["model"].(string); ok && effectiveModel != "" {
 			reqLog.Model = effectiveModel // 含回退后的实际服务模型
+			if _, isZen := resolveZenInfo(effectiveModel); isZen {
+				reqLog.Upstream = upstreamOpenCode // zen 反向故障转移后归因 opencode
+			}
 		}
 		if err != nil {
 			log.Printf("  api error: %v", err)
@@ -792,7 +795,14 @@ func clineErrorHTTPStatus(err error) int {
 func callClineAPI(params map[string]any, stream bool) (*http.Response, *Account, error) {
 	model, _ := params["model"].(string)
 	if model == "free" {
-		return callFreeClineAPI(params, stream)
+		resp, acc, err := callFreeClineAPI(params, stream)
+		if err != nil {
+			// Cline 残血池整条链耗尽（429 冷却/无账号）→ 落到 zen 免费模型
+			if fbResp, attempted := clineFailoverToZen(params, stream); attempted {
+				return fbResp, nil, nil
+			}
+		}
+		return resp, acc, err
 	}
 	// zen 免费模型进入 cline 池仅发生在 zen 故障转移期间：改写成 cline 侧可用的
 	// free 模型链，否则 Cline 上游会报 "invalid model format. Expected format:
@@ -875,6 +885,10 @@ func callClineAPI(params map[string]any, stream bool) (*http.Response, *Account,
 			return resp, acc, nil
 		}
 	}
+	// Cline 侧（含 free 链）全部耗尽 → 反向故障转移到 zen 免费模型
+	if fbResp, attempted := clineFailoverToZen(params, stream); attempted {
+		return fbResp, nil, nil
+	}
 	if hasActiveAccounts() {
 		return nil, nil, &freeModelUnavailableError{message: fmt.Sprintf("model %q is cooling on all accounts and no fallback model is available", model)}
 	}
@@ -896,12 +910,48 @@ func isFreeAliasModel(model string) bool {
 	if model == "free" {
 		return true
 	}
-	for _, m := range freeModelChain {
+	for _, m := range defaultFreeChain() {
 		if m == model {
 			return true
 		}
 	}
 	return false
+}
+
+// defaultFreeChain 动态派生默认回退链（管理员未配置 modelChain 时）：
+// 优先取 Cline 远程同步的免费模型（有效、不下架），再补内置常量链。
+// 已下架的内置模型（如 longcat-2.0，不在远程同步列表）自动排除，不再写死；
+// 从未同步成功（离线）时回退内置常量链。
+func defaultFreeChain() []string {
+	remote := remoteModelsActive()
+	p := loadPool()
+	known := make(map[string]bool, len(p.Models))
+	var remoteFree []string
+	for _, m := range p.Models {
+		known[m.ID] = true
+		if remote && m.Source == "remote" && m.Cost == "free" && m.Status == "active" {
+			remoteFree = append(remoteFree, m.ID)
+		}
+	}
+	chain := make([]string, 0, len(remoteFree)+len(freeModelChain))
+	seen := make(map[string]bool, len(remoteFree)+len(freeModelChain))
+	for _, m := range remoteFree {
+		if !seen[m] {
+			seen[m] = true
+			chain = append(chain, m)
+		}
+	}
+	for _, m := range freeModelChain {
+		if seen[m] || (remote && !known[m]) {
+			continue
+		}
+		seen[m] = true
+		chain = append(chain, m)
+	}
+	if len(chain) == 0 {
+		return freeModelChain
+	}
+	return chain
 }
 
 // hasAnyFallbackLeft 判断点名模型之后是否还有候选（决定 500 是否透传）。
@@ -916,11 +966,11 @@ func hasAnyFallbackLeft(requested, current string) bool {
 }
 
 // modelFallbackChain 显式模型的降级序列：点名模型优先，其后是管理员配置的
-// 回退链（modelChain）；未配置时用内置 free 模型链。均去重。
+// 回退链（modelChain）；未配置时动态派生默认链（排除已下架模型）。均去重。
 func modelFallbackChain(requested string) []string {
 	configured := getProxyConfig().ModelChain
 	if len(configured) == 0 {
-		configured = freeModelChain
+		configured = defaultFreeChain()
 	}
 	chain := make([]string, 0, 1+len(configured))
 	chain = append(chain, requested)
@@ -946,14 +996,16 @@ func hasActiveAccounts() bool {
 }
 
 func callFreeClineAPI(params map[string]any, stream bool) (*http.Response, *Account, error) {
-	// "free" 别名的实际顺序：管理员配置的回退链优先，否则内置 free 链。
+	// "free" 别名的实际顺序：管理员配置的回退链优先，否则动态派生默认链。
 	configured := getProxyConfig().ModelChain
 	chain := configured
 	if len(configured) == 0 {
-		chain = freeModelChain
+		chain = defaultFreeChain()
 	}
 	// 同样按可用性重排：把流量摊到用量最少的可用模型上，而不是顺序打满第一个。
 	chain = sortModelsByAvailability(chain)
+	var lastErr error
+	lastWas429 := false
 	for _, model := range chain {
 		params["model"] = model
 		// "free" 链是纯降级路径：全部用「最久未用优先」挑账号，摊平用量。
@@ -971,11 +1023,23 @@ func callFreeClineAPI(params map[string]any, stream bool) (*http.Response, *Acco
 			if errors.As(err, &accountErr) {
 				continue
 			}
-			apiErr, ok := err.(*clineAPIError)
-			if !ok || apiErr.statusCode != http.StatusTooManyRequests {
-				return nil, usedAcc, err
+			lastErr = err
+			lastWas429 = false
+			if apiErr, ok := err.(*clineAPIError); ok && apiErr.statusCode == http.StatusTooManyRequests {
+				// 429 限流：换下一个账号继续试当前模型
+				lastWas429 = true
+				continue
 			}
+			// 其他 API 错误（如上游 500）：换链内下一个模型降级
+			break
 		}
+	}
+	if lastErr != nil {
+		if lastWas429 {
+			// 整条链被限流耗尽：按 free 池不可用处理（429）
+			return nil, nil, &freeModelUnavailableError{message: "no eligible accounts available for free models"}
+		}
+		return nil, nil, lastErr
 	}
 	return nil, nil, &freeModelUnavailableError{message: "no eligible accounts available for free models"}
 }
@@ -1882,17 +1946,48 @@ func openAIToAnthropic(openAI map[string]any) map[string]any {
 
 // zenFailoverToCline zen 调用失败后的透明降级：改走 cline 账号池 free 模型链。
 // attempted=false 表示未启用故障转移，调用方维持原错误路径。
+// 注意：失败计数由 callZenAPI 内部标记（每请求恰好一次），此处不再重复计数，
+// 否则限流/服务错误路径 + 此处各计一次，故障转移会被过早触发。
 func zenFailoverToCline(params map[string]any, stream bool) (*http.Response, *Account, error, bool) {
 	cfg := getZenConfig()
 	if !cfg.Failover {
 		return nil, nil, nil, false
 	}
 	orig, _ := params["model"].(string)
-	markZenFail()
 	log.Printf("  zen failover: %q unavailable upstream, falling back to cline free pool", orig)
 	params["model"] = "free"
 	resp, acc, err := callFreeClineAPI(params, stream)
 	return resp, acc, err, true
+}
+
+// clineFailoverToZen Cline 侧（含 free 池链）全部耗尽后的反向故障转移：
+// 落到 opencode zen 免费模型。与 zenFailoverToCline 方向相反，形成双向闭环——
+// 任一免费上游挂掉，流量自动落到另一条。zen 未启用或处于故障转移窗口
+// （连续失败被判定不可达）时不尝试；最多试 3 个免费模型，避免在坏模型上反复烧时间。
+func clineFailoverToZen(params map[string]any, stream bool) (*http.Response, bool) {
+	cfg := getZenConfig()
+	if !cfg.Enabled || zenFailedNow() {
+		return nil, false
+	}
+	orig, _ := params["model"].(string)
+	attempts := 0
+	for _, m := range currentZenModels() {
+		if !isZenFreeModel(m) || m.ID == orig {
+			continue
+		}
+		attempts++
+		if attempts > 3 {
+			break
+		}
+		log.Printf("  cline failover: %q exhausted, trying zen free model %q", orig, m.ID)
+		params["model"] = m.ID
+		resp, err := callZenAPI(params, stream)
+		if err == nil {
+			return resp, true
+		}
+		log.Printf("  cline failover: zen model %q failed: %v", m.ID, err)
+	}
+	return nil, false
 }
 
 func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
@@ -2036,6 +2131,9 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 	resp, acc, err := callClineAPI(openAIReq, req.Stream)
 	if effectiveModel, ok := openAIReq["model"].(string); ok && effectiveModel != "" {
 		reqLog.Model = effectiveModel // 含回退后的实际服务模型
+		if _, isZen := resolveZenInfo(effectiveModel); isZen {
+			reqLog.Upstream = upstreamOpenCode // zen 反向故障转移后归因 opencode
+		}
 	}
 	if err != nil {
 		log.Printf("  anthropic api error: %v", err)
