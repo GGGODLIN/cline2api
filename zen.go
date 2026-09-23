@@ -40,6 +40,33 @@ const (
 
 const zenModelSyncInterval = 10 * time.Minute
 
+// zenHeaderWatchdogTimeout 限制 zen 上游"发出请求 → 收到响应头"的最长等待。
+const zenHeaderWatchdogTimeout = 60 * time.Second
+
+// zenMaxRetryWait 单次重试的最大等待（上游 Retry-After 可达 13h，绝不能在请求里睡数小时）。
+const zenMaxRetryWait = 60 * time.Second
+
+// zenMaxProxyCooldown 出口代理冷却的上限（本地代理端口背后可切换节点，长冷却有害）。
+const zenMaxProxyCooldown = 30 * time.Minute
+
+// withCancelOnClose 包装响应 body：调用方关闭 body 时同步释放请求 ctx，
+// 避免长生命周期流式响应泄漏 cancel 函数。
+func withCancelOnClose(resp *http.Response, cancel context.CancelFunc) *http.Response {
+	resp.Body = &cancelOnCloseBody{ReadCloser: resp.Body, cancel: cancel}
+	return resp
+}
+
+type cancelOnCloseBody struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+	once   sync.Once
+}
+
+func (b *cancelOnCloseBody) Close() error {
+	b.once.Do(b.cancel)
+	return b.ReadCloser.Close()
+}
+
 // zenSeedModels 内置 zen 免费模型种子表（含别名），仅作为从未同步成功时的离线 fallback。
 // 与 builtinModels（Cline 侧）同一模式：同步成功后以远程列表为准。
 // 列表与 2026-09-22 线上 /models 实测的免费模型保持一致。
@@ -724,30 +751,46 @@ func callZenAPI(params map[string]any, stream bool) (*http.Response, error) {
 		log.Printf("  zen upstream: model=%v stream=%v(下游=%v) msgs=%d via=%s attempt=%d session=%s",
 			bodyParamsModel(params), anonymous, stream, getMsgCount(params), describeZenProxy(), attempt+1, truncate(sess, 30))
 
+		// 响应头看门狗：黑洞场景（TCP 通、握手/响应头静默丢弃）请求会永久挂起，
+		// 且 callZenAPI 不返回则 markZenFail 不触发、故障转移永远无法激活。
+		// 60s 内未收到响应头则取消本次尝试（计为网络错误、走重试/故障转移）；
+		// 响应头到达后立即停掉看门狗，流式传输时长不受限制。
+		watchCtx, watchCancel := context.WithCancel(context.Background())
+		watchdog := time.AfterFunc(zenHeaderWatchdogTimeout, watchCancel)
+		req = req.WithContext(watchCtx)
+
 		resp, err := getZenHTTPClient().Do(req)
 		if err != nil {
-			// 网络错误：退避重试（不计入故障转移，瞬时可恢复）
+			watchdog.Stop()
+			watchCancel()
+			// 网络错误：退避重试；重试耗尽计一次失败（网络类故障也参与故障转移，
+			// 持续网络不可达时才会切 Cline 池）
 			if attempt < retries {
 				log.Printf("  zen network error (%v), retry %d/%d after %v", err, attempt+1, retries, delay)
 				time.Sleep(withRetryJitter(delay))
 				delay *= 2
 				continue
 			}
+			markZenFail()
 			msg := fmt.Errorf("zen request: %w", err)
 			if strings.Contains(err.Error(), "timeout") || strings.Contains(err.Error(), "handshake") ||
-				strings.Contains(err.Error(), "connection refused") || strings.Contains(err.Error(), "unreachable") {
+				strings.Contains(err.Error(), "connection refused") || strings.Contains(err.Error(), "unreachable") ||
+				strings.Contains(err.Error(), "context canceled") {
 				return nil, fmt.Errorf("%w（opencode.ai 网络不可达，可在管理页「上游服务 → opencode 出口代理」配置代理）", msg)
 			}
 			return nil, msg
 		}
+		watchdog.Stop()
 		if resp.StatusCode == http.StatusOK {
 			markZenSuccess()
 			if anonymous && !stream {
+				// 折叠路径内部会关闭 body（连带释放 watchCtx）
 				return collapseZenStreamResponse(resp, bodyParamsModel(params))
 			}
-			return resp, nil
+			return withCancelOnClose(resp, watchCancel), nil
 		}
 
+		watchCancel()
 		bodyBytes := readAllLimited(resp.Body, 64<<10)
 		resp.Body.Close()
 		reason := fmt.Sprintf("zen API %d: %s", resp.StatusCode, truncate(string(bodyBytes), 500))
@@ -765,25 +808,37 @@ func callZenAPI(params map[string]any, stream bool) (*http.Response, error) {
 		}
 
 		if isRateLimited(resp.StatusCode, string(bodyBytes)) {
-			// 冷却当前出口代理（Retry-After 优先，默认 10 分钟）
+			ra := parseRetryAfter(resp.Header.Get("Retry-After"))
+			// 冷却当前出口代理（Retry-After 优先，默认 10 分钟，封顶 30 分钟）：
+			// 单个本地代理端口背后可切换节点（出口 IP 变化），长冷却有害无益
 			if idx := lastZenProxyIdx(); idx >= 0 {
-				d := parseRetryAfter(resp.Header.Get("Retry-After"))
+				d := ra
 				if d <= 0 {
 					d = 10 * time.Minute
 				}
+				if d > zenMaxProxyCooldown {
+					d = zenMaxProxyCooldown
+				}
 				cooldownZenProxy(idx, d)
 			}
-			if attempt < retries {
-				wait := delay
-				if ra := parseRetryAfter(resp.Header.Get("Retry-After")); ra > wait {
-					wait = ra
-				}
-				log.Printf("  zen rate limited (%d), retry %d/%d after %v", resp.StatusCode, attempt+1, retries, wait)
-				time.Sleep(withRetryJitter(wait))
+			// 短限流（≤60s）值得按 Retry-After 等待重试；
+			// 长限流（实测可达 13h）重试无意义，立即失败触发故障转移
+			if attempt < retries && ra > 0 && ra <= zenMaxRetryWait {
+				log.Printf("  zen rate limited (%d), retry %d/%d after %v", resp.StatusCode, attempt+1, retries, ra)
+				time.Sleep(withRetryJitter(ra))
+				delay *= 2
+				continue
+			}
+			if attempt < retries && ra <= 0 {
+				log.Printf("  zen rate limited (%d), retry %d/%d after %v", resp.StatusCode, attempt+1, retries, delay)
+				time.Sleep(withRetryJitter(delay))
 				delay *= 2
 				continue
 			}
 			markZenFail()
+			if ra > 10*time.Minute {
+				return nil, fmt.Errorf("%s（opencode 免费层出口 IP 限流 ~%s，切换代理节点后可立即重试）", reason, ra.Truncate(time.Minute))
+			}
 			return nil, fmt.Errorf("%s", reason)
 		}
 
