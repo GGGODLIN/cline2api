@@ -94,7 +94,7 @@ func TestCallClineAPIWithAccountDoesNotExpireWhenRefreshAfter401HitsNetworkError
 	pool = &AccountPool{Accounts: []*Account{acc}}
 
 	_, _, err := callClineAPIWithAccount(acc, map[string]any{
-		"model":    freeModelMuse,
+		"model":    freeModelFallback,
 		"messages": []any{map[string]any{"role": "user", "content": "hello"}},
 	}, false)
 	if err == nil {
