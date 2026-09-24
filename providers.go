@@ -215,6 +215,15 @@ func callProvider(p *CustomProvider, params map[string]any, stream bool) (*http.
 			body["max_tokens"] = mt
 		}
 	}
+	// 与 buildUpstreamBody 对称：低于上游硬下限的输出预算兜到默认值
+	if mt, ok := body["max_tokens"].(float64); ok && mt < minUpstreamMaxTokens {
+		log.Printf("  provider clamp max_tokens=%d -> %d (upstream requires >= %d)", int(mt), defaultMaxTokens, minUpstreamMaxTokens)
+		body["max_tokens"] = defaultMaxTokens
+	}
+	if mt, ok := body["max_completion_tokens"].(float64); ok && mt < minUpstreamMaxTokens {
+		log.Printf("  provider clamp max_completion_tokens=%d -> %d (upstream requires >= %d)", int(mt), defaultMaxTokens, minUpstreamMaxTokens)
+		body["max_completion_tokens"] = defaultMaxTokens
+	}
 
 	bodyJSON, err := json.Marshal(body)
 	if err != nil {
