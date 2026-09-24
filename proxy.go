@@ -29,6 +29,10 @@ const (
 	freeModelV41                         = "cline-free/deepseek-v4.1-flash"
 	freeModelMuseAlias                   = "free-muse"
 	freeModelMuse                        = "cline-free/muse-spark-1.3-contributor"
+	freeModelMimo26Alias                 = "free-mimo26"
+	freeModelMimo26                      = "cline-free/mimo-v2.6-flash"
+	freeModelBunnyAlias                  = "free-bunny"
+	freeModelBunny                       = "stealth/space-bunny-alpha"
 	freeModelInsufficientCreditsCooldown = 24 * time.Hour
 )
 
@@ -688,6 +692,10 @@ func callClineAPI(params map[string]any, stream bool) (*http.Response, *Account,
 		return callFreeClineAPIForModel(params, stream, freeModelV41)
 	case freeModelMuseAlias:
 		return callFreeClineAPIForModel(params, stream, freeModelMuse)
+	case freeModelMimo26Alias:
+		return callFreeClineAPIForModel(params, stream, freeModelMimo26)
+	case freeModelBunnyAlias:
+		return callFreeClineAPIForModel(params, stream, freeModelBunny)
 	}
 
 	acc := pickAccountForModel(model)
