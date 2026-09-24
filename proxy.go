@@ -22,8 +22,8 @@ import (
 const (
 	defaultMaxTokens                     = 128000
 	defaultReasoningEffort               = "high"
-	fallbackDefaultModel                 = "z-ai/glm-5.3-flash"
-	freeModelPrimary                     = "z-ai/glm-5.3-flash"
+	fallbackDefaultModel                 = "cline-free/mimo-v2.6-flash"
+	freeModelPrimary                     = "cline-free/mimo-v2.6-flash"
 	freeModelFallback                    = "deepseek/deepseek-v4-flash"
 	freeModelV41Alias                    = "free-v41"
 	freeModelV41                         = "cline-free/deepseek-v4.1-flash"
@@ -37,13 +37,11 @@ var freeModelChain = []string{freeModelPrimary, freeModelFallback}
 // builtinModels 是内置默认模型列表（不可删除），仅作为离线 / 未同步时的 fallback。
 // 同步 Cline 官方推荐模型成功后，getAllModels 以远程模型为主。
 var builtinModels = []Model{
-	{ID: "z-ai/glm-5.3-flash", Provider: "z-ai", Cost: "free", Status: "active", Custom: false},
 	{ID: freeModelMuse, Provider: "cline-free", Cost: "free", Status: "active", Custom: false},
 	{ID: "cline-pass/glm-5.2", Provider: "zai", Cost: "pass", Status: "active", Custom: false},
 	{ID: "cline-pass/deepseek-v4-flash", Provider: "deepseek", Cost: "pass", Status: "active", Custom: false},
 	{ID: "cline-pass/qwen3.7-max", Provider: "qwen", Cost: "pass", Status: "active", Custom: false},
 	{ID: "deepseek/deepseek-v4-flash", Provider: "deepseek", Cost: "free", Status: "active", Custom: false},
-	{ID: "poolside/laguna-s-2.1:free", Provider: "poolside", Cost: "free", Status: "active", Custom: false},
 }
 
 // getAllModels 返回可用模型列表：
@@ -684,8 +682,6 @@ func callClineAPI(params map[string]any, stream bool) (*http.Response, *Account,
 	switch model {
 	case "free":
 		return callFreeClineAPI(params, stream)
-	case "free-glm":
-		return callFreeClineAPIForModel(params, stream, freeModelPrimary)
 	case "free-ds":
 		return callFreeClineAPIForModel(params, stream, freeModelFallback)
 	case freeModelV41Alias:

@@ -397,7 +397,7 @@ func TestCallClineAPIFreeFallsBackToDSAfterAllGLMAccountsUnavailable(t *testing.
 		}
 		model, _ := upstream["model"].(string)
 		models = append(models, model)
-		if token == "token-one" && model == "z-ai/glm-5.3-flash" || token == "token-two" {
+		if token == "token-one" && model == "cline-free/mimo-v2.6-flash" || token == "token-two" {
 			return &http.Response{
 				StatusCode: http.StatusTooManyRequests,
 				Body:       io.NopCloser(strings.NewReader(`{"error":"quota","message":"Try again in 1h"}`)),
@@ -432,7 +432,7 @@ func TestCallClineAPIFreeFallsBackToDSAfterAllGLMAccountsUnavailable(t *testing.
 	if got, want := strings.Join(attempts, ","), "token-one,token-two,token-one"; got != want {
 		t.Fatalf("attempts = %q, want %q", got, want)
 	}
-	if got, want := strings.Join(models, ","), "z-ai/glm-5.3-flash,z-ai/glm-5.3-flash,deepseek/deepseek-v4-flash"; got != want {
+	if got, want := strings.Join(models, ","), "cline-free/mimo-v2.6-flash,cline-free/mimo-v2.6-flash,deepseek/deepseek-v4-flash"; got != want {
 		t.Fatalf("models = %q, want %q", got, want)
 	}
 	if got, want := params["model"], "deepseek/deepseek-v4-flash"; got != want {
@@ -759,7 +759,7 @@ func TestCallClineAPIDirectModelsKeepExactIDWithoutFallback(t *testing.T) {
 		httpClient.Transport = oldTransport
 	})
 
-	for _, model := range []string{"z-ai/glm-5.3-flash", "deepseek/deepseek-v4-flash"} {
+	for _, model := range []string{"cline-free/mimo-v2.6-flash", "deepseek/deepseek-v4-flash"} {
 		t.Run(model, func(t *testing.T) {
 			account := &Account{
 				AccountID:   "direct-account",

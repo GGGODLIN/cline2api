@@ -178,7 +178,7 @@ Files are looked up in this order: executable directory → working directory �
 - Set the default model in "Proxy Config → Default Model"; if unset, it falls back to the first free model
 
 > Built-in fallback models (used offline / when sync fails):
-> `cline-free/glm-5.2`, `cline-pass/glm-5.2`, `cline-pass/deepseek-v4-flash`, `cline-pass/qwen3.7-max`, `deepseek/deepseek-v4-flash`, `poolside/laguna-s-2.1:free`
+> `cline-free/muse-spark-1.3-contributor`, `cline-pass/glm-5.2`, `cline-pass/deepseek-v4-flash`, `cline-pass/qwen3.7-max`, `deepseek/deepseek-v4-flash`
 
 ## Project Structure
 

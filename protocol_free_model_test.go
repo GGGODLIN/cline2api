@@ -567,7 +567,7 @@ func TestOpenAIChatCompletionsFreeStreamDoesNotRetryAfterResponseStarts(t *testi
 		}
 		return &http.Response{
 			StatusCode: http.StatusOK,
-			Body:       io.NopCloser(strings.NewReader("data: {\"id\":\"stream-started\",\"model\":\"z-ai/glm-5.3-flash\",\"choices\":[{\"delta\":{\"content\":\"stream started\"}}]}\n\ndata: [DONE]\n\n")),
+			Body:       io.NopCloser(strings.NewReader("data: {\"id\":\"stream-started\",\"model\":\"cline-free/mimo-v2.6-flash\",\"choices\":[{\"delta\":{\"content\":\"stream started\"}}]}\n\ndata: [DONE]\n\n")),
 			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
 			Request:    req,
 		}, nil
@@ -601,80 +601,6 @@ func TestOpenAIChatCompletionsFreeStreamDoesNotRetryAfterResponseStarts(t *testi
 		t.Fatalf("attempts = %q, want %q", got, want)
 	}
 	if got, want := strings.Join(models, ","), freeModelPrimary; got != want {
-		t.Fatalf("models = %q, want %q", got, want)
-	}
-}
-
-func TestOpenAIChatCompletionsFreeGLMExhaustsOnlyGLMPool(t *testing.T) {
-	oldPool := pool
-	oldConfig := getProxyConfig()
-	oldTransport := httpClient.Transport
-	t.Cleanup(func() {
-		pool = oldPool
-		setProxyConfig(oldConfig)
-		httpClient.Transport = oldTransport
-	})
-
-	first := &Account{
-		AccountID:   "chat-free-glm-one",
-		Email:       "chat-free-glm-one@example.com",
-		AccessToken: "chat-free-glm-one-token",
-		ExpiresAt:   time.Now().Add(time.Hour).UnixMilli(),
-		Status:      "active",
-	}
-	second := &Account{
-		AccountID:   "chat-free-glm-two",
-		Email:       "chat-free-glm-two@example.com",
-		AccessToken: "chat-free-glm-two-token",
-		ExpiresAt:   time.Now().Add(time.Hour).UnixMilli(),
-		Status:      "active",
-	}
-	pool = &AccountPool{Accounts: []*Account{first, second}}
-	config := defaultProxyConfig()
-	config.Strategy = "fill"
-	setProxyConfig(config)
-
-	var attempts []string
-	var models []string
-	httpClient.Transport = freeModelRoundTripper(func(req *http.Request) (*http.Response, error) {
-		token := strings.TrimPrefix(req.Header.Get("Authorization"), "Bearer ")
-		attempts = append(attempts, token)
-		body, err := io.ReadAll(req.Body)
-		if err != nil {
-			return nil, err
-		}
-		var params map[string]any
-		if err := json.Unmarshal(body, &params); err != nil {
-			return nil, err
-		}
-		model, _ := params["model"].(string)
-		models = append(models, model)
-		return &http.Response{
-			StatusCode: http.StatusTooManyRequests,
-			Body:       io.NopCloser(strings.NewReader(`{"error":"quota","message":"Try again in 1h"}`)),
-			Header:     make(http.Header),
-			Request:    req,
-		}, nil
-	})
-
-	baseURL := protocolTestServer(t)
-	req, err := http.NewRequest(http.MethodPost, baseURL+"/v1/chat/completions", strings.NewReader(`{"model":"free-glm","messages":[{"role":"user","content":"hello"}]}`))
-	if err != nil {
-		t.Fatalf("create request: %v", err)
-	}
-	responseClient := &http.Client{Transport: &http.Transport{}, Timeout: 2 * time.Second}
-	resp, err := responseClient.Do(req)
-	if err != nil {
-		t.Fatalf("send request: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusTooManyRequests {
-		t.Fatalf("response status = %d, want %d", resp.StatusCode, http.StatusTooManyRequests)
-	}
-	if got, want := strings.Join(attempts, ","), "chat-free-glm-one-token,chat-free-glm-two-token"; got != want {
-		t.Fatalf("attempts = %q, want %q", got, want)
-	}
-	if got, want := strings.Join(models, ","), freeModelPrimary+","+freeModelPrimary; got != want {
 		t.Fatalf("models = %q, want %q", got, want)
 	}
 }
@@ -747,81 +673,6 @@ func TestAnthropicMessagesFreeDSUsesStrictAlias(t *testing.T) {
 		t.Fatalf("response model = %v, want %q", response["model"], freeModelFallback)
 	}
 	if got, want := strings.Join(models, ","), freeModelFallback; got != want {
-		t.Fatalf("models = %q, want %q", got, want)
-	}
-}
-
-func TestOpenAIResponsesFreeGLMUsesStrictAlias(t *testing.T) {
-	oldPool := pool
-	oldConfig := getProxyConfig()
-	oldTransport := httpClient.Transport
-	t.Cleanup(func() {
-		pool = oldPool
-		setProxyConfig(oldConfig)
-		httpClient.Transport = oldTransport
-	})
-
-	account := &Account{
-		AccountID:   "responses-free-glm",
-		Email:       "responses-free-glm@example.com",
-		AccessToken: "responses-free-glm-token",
-		ExpiresAt:   time.Now().Add(time.Hour).UnixMilli(),
-		Status:      "active",
-	}
-	pool = &AccountPool{Accounts: []*Account{account}}
-	config := defaultProxyConfig()
-	config.Strategy = "fill"
-	setProxyConfig(config)
-
-	var models []string
-	httpClient.Transport = freeModelRoundTripper(func(req *http.Request) (*http.Response, error) {
-		body, err := io.ReadAll(req.Body)
-		if err != nil {
-			return nil, err
-		}
-		var params map[string]any
-		if err := json.Unmarshal(body, &params); err != nil {
-			return nil, err
-		}
-		model, _ := params["model"].(string)
-		models = append(models, model)
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Body:       io.NopCloser(strings.NewReader(`{"id":"responses-free-glm","model":"z-ai/glm-5.3-flash","choices":[{"message":{"role":"assistant","content":"glm alias"},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}`)),
-			Header:     make(http.Header),
-			Request:    req,
-		}, nil
-	})
-
-	baseURL := protocolTestServer(t)
-	req, err := http.NewRequest(http.MethodPost, baseURL+"/v1/responses", strings.NewReader(`{"model":"free-glm","input":"hello"}`))
-	if err != nil {
-		t.Fatalf("create request: %v", err)
-	}
-	responseClient := &http.Client{Transport: &http.Transport{}, Timeout: 2 * time.Second}
-	resp, err := responseClient.Do(req)
-	if err != nil {
-		t.Fatalf("send request: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("response status = %d, want %d", resp.StatusCode, http.StatusOK)
-	}
-	responseBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatalf("read response: %v", err)
-	}
-	var response map[string]any
-	if err := json.Unmarshal(responseBody, &response); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
-	if response["model"] != freeModelPrimary {
-		t.Fatalf("response model = %v, want %q", response["model"], freeModelPrimary)
-	}
-	if response["output_text"] != "glm alias" {
-		t.Fatalf("output_text = %v, want glm alias", response["output_text"])
-	}
-	if got, want := strings.Join(models, ","), freeModelPrimary; got != want {
 		t.Fatalf("models = %q, want %q", got, want)
 	}
 }

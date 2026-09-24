@@ -185,7 +185,7 @@ git push origin v1.0.0
 - 默认模型可在「代理配置 → 默认模型」下拉中设置；未设置时自动回退到第一个免费模型
 
 > 内置 fallback 模型（离线/同步失败时兜底）：
-> `cline-free/glm-5.2`、`cline-pass/glm-5.2`、`cline-pass/deepseek-v4-flash`、`cline-pass/qwen3.7-max`、`deepseek/deepseek-v4-flash`、`poolside/laguna-s-2.1:free`
+> `cline-free/muse-spark-1.3-contributor`、`cline-pass/glm-5.2`、`cline-pass/deepseek-v4-flash`、`cline-pass/qwen3.7-max`、`deepseek/deepseek-v4-flash`
 
 ## 项目结构
 
