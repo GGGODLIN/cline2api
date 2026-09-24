@@ -122,6 +122,15 @@ CLINE_PROXY_HOST=0.0.0.0 ./cline-proxy
 > ⚠️ **安全警告**：管理后台 `/admin/` 无鉴权（除非设置了访问密码），监听非回环地址（如 `0.0.0.0`）会将其暴露给局域网。
 > 请确认网络环境可信，或配合防火墙仅放行需要的 IP 访问 `3457` 端口。
 
+### 6. 出口代理（跨区限制）
+
+国内直连 Cline 上游（`api.cline.bot` / `api.workos.com`）会命中跨区限制，本工具支持在管理后台配置**应用内出口代理**，无需在主机开 TUN：
+
+- **Cline 出口代理**：管理后台「上游服务 → Cline 出口代理」，填入代理列表（每行一个，支持 `http` / `https` / `socks5` / `socks5h`，如 `socks5://127.0.0.1:1080`），所有发往 Cline 的请求（对话、登录/令牌刷新、模型同步）经代理池按策略（轮询 / 随机 / 填满）轮询出去。配置持久化在 `.cline-proxy.json`，保存即生效，无需重启。
+- **opencode 出口代理**：同一页面的 opencode Zen 区块，为 opencode（zen）上游单独配置代理池，命中限流时自动冷却当前出口。
+
+优先级：应用内代理 > 环境变量代理（`HTTPS_PROXY`）> 直连。回环 / 内网目标（如本机 Ollama 等自定义 Provider）始终直连，不经代理。
+
 ## 构建
 
 ### 桌面端（单文件跨平台）
@@ -171,6 +180,8 @@ git push origin v1.0.0
 |------|------|
 | `.cline-accounts.json` | 账号池、API Key、自定义模型与默认模型 |
 | `.cline-request-logs.json` | 请求日志 |
+| `.cline-proxy.json` | Cline 出口代理池配置 |
+| `.cline-zen.json` | opencode（zen）配置，含其出口代理池 |
 | `override.md` | System Prompt 覆盖（可选）|
 
 > ⚠️ 账号文件含明文 refreshToken，属于敏感凭据，不要放入发布包或提交到 Git。

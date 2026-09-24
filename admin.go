@@ -86,6 +86,8 @@ func registerAdminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/admin/api/opencode/config", auth(handleOpenCodeConfig))
 	mux.HandleFunc("/admin/api/opencode/config/update", auth(handleOpenCodeConfigUpdate))
 	mux.HandleFunc("/admin/api/opencode/models/sync", auth(handleOpenCodeModelSync))
+	mux.HandleFunc("/admin/api/cline-proxy/config", auth(handleClineProxyConfig))
+	mux.HandleFunc("/admin/api/cline-proxy/config/update", auth(handleClineProxyConfigUpdate))
 	mux.HandleFunc("/admin/api/models/add", auth(handleAdminModelAdd))
 	mux.HandleFunc("/admin/api/models/delete", auth(handleAdminModelDelete))
 	mux.HandleFunc("/admin/api/models/context", auth(handleAdminModelContext))
@@ -1575,6 +1577,77 @@ func handleOpenCodeConfigUpdate(w http.ResponseWriter, r *http.Request) {
 	setZenConfig(cfg)
 	log.Printf("admin: opencode config updated (enabled=%v)", cfg.Enabled)
 	writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: tAPI(r, "opencode_config_saved")})
+}
+
+// GET /admin/api/cline-proxy/config — Cline 出口代理配置（代理地址脱敏返回）
+func handleClineProxyConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
+		return
+	}
+	cfg := getClineProxyConfig()
+	maskedProxies := make([]string, 0, len(cfg.Proxies))
+	for _, p := range cfg.Proxies {
+		maskedProxies = append(maskedProxies, maskProxyURL(p))
+	}
+	writeAPI(w, http.StatusOK, apiResponse{Success: true, Data: map[string]any{
+		"proxies":       maskedProxies,
+		"proxyStrategy": cfg.ProxyStrategy,
+	}})
+}
+
+// POST /admin/api/cline-proxy/config/update — 更新 Cline 出口代理配置
+func handleClineProxyConfigUpdate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
+		return
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: err.Error()})
+		return
+	}
+	defer r.Body.Close()
+
+	var req struct {
+		Proxies       []string `json:"proxies"`
+		ProxyStrategy *string  `json:"proxyStrategy"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "invalid_json")})
+		return
+	}
+
+	if req.Proxies != nil {
+		if err := validateProxyList(req.Proxies); err != nil {
+			writeAPI(w, http.StatusBadRequest, apiResponse{Error: err.Error()})
+			return
+		}
+	}
+	cfg := getClineProxyConfig()
+	updated := &clineProxyConfigData{
+		Proxies:       cfg.Proxies,
+		ProxyStrategy: cfg.ProxyStrategy,
+	}
+	if req.Proxies != nil {
+		updated.Proxies = req.Proxies
+	}
+	if req.ProxyStrategy != nil {
+		switch *req.ProxyStrategy {
+		case "round_robin", "random", "fill":
+			updated.ProxyStrategy = *req.ProxyStrategy
+		default:
+			writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "invalid_proxy_strategy")})
+			return
+		}
+	}
+	setClineProxyConfig(updated)
+	if err := getClineProxyPersistErr(); err != nil {
+		writeAPI(w, http.StatusInternalServerError, apiResponse{Error: err.Error()})
+		return
+	}
+	log.Printf("admin: cline proxy config updated (%d proxies, %s)", len(updated.Proxies), updated.ProxyStrategy)
+	writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: tAPI(r, "cline_proxy_saved")})
 }
 
 // POST /admin/api/opencode/models/sync — 手动触发一次 opencode 模型同步

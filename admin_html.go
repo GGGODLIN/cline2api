@@ -699,11 +699,12 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
   <div class="page-header">
     <div>
       <div class="large-title">上游服务</div>
-      <div class="large-subtitle">opencode zen、请求头与自定义 Provider</div>
+      <div class="large-subtitle">opencode zen、Cline 出口代理、请求头与自定义 Provider</div>
     </div>
   </div>
   <div class="subtabs" id="upstreamSubTabs">
     <div class="subtab active" data-sub="zen">opencode Zen</div>
+    <div class="subtab" data-sub="cline">Cline 出口代理</div>
     <div class="subtab" data-sub="headers">请求头</div>
     <div class="subtab" data-sub="providers">自定义 Provider</div>
   </div>
@@ -780,6 +781,33 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
     </div>
   </div>
 
+  </div>
+
+  <div class="upstream-group" data-group="cline" style="display:none">
+  <div class="section">
+    <div class="section-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>Cline 出口代理</div>
+    <div class="section-desc">国内直连 Cline 上游会被跨区限制；配置后所有发往 Cline 的请求（对话、登录/令牌刷新、模型同步）经代理池轮询出去。支持 http / https / socks5 / socks5h，每行一个，如 <span class="mono">socks5://127.0.0.1:1080</span>。回环 / 内网地址（本机 Ollama 等自定义 Provider）始终直连；未配置时依次尝试环境变量代理、直连。</div>
+    <div class="section-body">
+      <div class="form-row">
+        <div class="field" style="max-width:260px">
+          <label>代理策略</label>
+          <select id="clineProxyStrategy">
+            <option value="round_robin">轮询 (round_robin)</option>
+            <option value="random">随机 (random)</option>
+            <option value="fill">填满 (fill)</option>
+          </select>
+        </div>
+      </div>
+      <div class="field" style="margin-top:10px">
+        <label>代理列表</label>
+        <textarea id="clineProxies" rows="4" style="width:100%;font-family:ui-monospace,monospace;font-size:12px;border:1px solid var(--border2);border-radius:8px;padding:8px;background:var(--surface);color:var(--text)" placeholder="socks5://127.0.0.1:1080&#10;http://user:pass@proxy.example.com:8080"></textarea>
+      </div>
+      <div class="form-actions" style="margin-top:14px">
+        <button class="btn btn-primary" onclick="saveClineProxyConfig()">保存 Cline 代理</button>
+      </div>
+      <div id="clineProxySaveResult" style="margin-top:8px"></div>
+    </div>
+  </div>
   </div>
 
   <div class="upstream-group" data-group="headers" style="display:none">
@@ -1313,7 +1341,7 @@ const I18N = {
   '上游服务': 'Upstreams',
   '密钥与安全': 'Keys & Security',
   '默认模型、轮询策略、回退链与可用模型': 'Default model, rotation strategy, fallback chain & models',
-  'opencode zen、请求头与自定义 Provider': 'opencode zen, request headers & custom providers',
+  'opencode zen、Cline 出口代理、请求头与自定义 Provider': 'opencode zen, Cline egress proxies, headers & custom providers',
   'Cline 请求头': 'Cline Request Headers',
   'opencode 请求头': 'OpenCode Request Headers',
   '请求头': 'Headers',
@@ -1330,6 +1358,12 @@ const I18N = {
   '正常': 'Healthy',
   '已同步模型': 'Models synced',
   '接入 opencode（zen）免费模型。按请求中的模型名自动分流：免费模型走 opencode 上游，付费模型直接拒绝，其余走 Cline 账号池。': 'Integrates opencode (zen) free models. Requests are routed automatically by model name: free models go to the opencode upstream, paid models are rejected, everything else goes to the Cline account pool.',
+  // Cline 出口代理
+  'Cline 出口代理': 'Cline Egress Proxies',
+  '国内直连 Cline 上游会被跨区限制；配置后所有发往 Cline 的请求（对话、登录/令牌刷新、模型同步）经代理池轮询出去。支持 http / https / socks5 / socks5h，每行一个，如 ': 'Cline upstream is region-restricted from mainland China; once configured, all requests to Cline (chat, login/token refresh, model sync) egress through a rotating proxy pool. Supports http / https / socks5 / socks5h, one per line, e.g. ',
+  '。回环 / 内网地址（本机 Ollama 等自定义 Provider）始终直连；未配置时依次尝试环境变量代理、直连。': '. Loopback / private addresses (local Ollama and other custom providers) always connect directly; without config, env proxies then direct connection are tried.',
+  '保存 Cline 代理': 'Save Cline proxies',
+  'Cline 代理配置已保存': 'Cline proxy config saved',
   // 模型分组
   'opencode · 免费模型': 'opencode · Free Models',
   'opencode · 付费模型': 'opencode · Paid Models',
@@ -1435,7 +1469,7 @@ loadStats(); loadAccounts(); }
     if (el.dataset.tab === 'accounts') loadAccounts();
     if (el.dataset.tab === 'logs') loadRequestLogs(true);
     if (el.dataset.tab === 'routing') { loadModels().then(() => loadConfig()); }
-    if (el.dataset.tab === 'upstreams') { loadOcConfig(); loadZenHeaders(); loadProviders(); }
+    if (el.dataset.tab === 'upstreams') { loadOcConfig(); loadClineProxyConfig(); loadZenHeaders(); loadProviders(); }
     if (el.dataset.tab === 'security') { loadKeys(); loadConfig(); }
   });
 });
@@ -1450,7 +1484,7 @@ function switchTab(name) {
   if (name === 'accounts') loadAccounts();
   if (name === 'logs') loadRequestLogs(true);
   if (name === 'routing') { loadModels().then(() => loadConfig()); }
-  if (name === 'upstreams') { loadOcConfig(); loadZenHeaders(); loadProviders(); }
+  if (name === 'upstreams') { loadOcConfig(); loadClineProxyConfig(); loadZenHeaders(); loadProviders(); }
   if (name === 'security') { loadKeys(); loadConfig(); }
 }
 
@@ -2476,6 +2510,30 @@ async function saveOcConfig() {
     _('ocSaveResult').innerHTML = '<span style="color:var(--green)">✓ ' + t('opencode 配置已保存') + '</span>';
     setTimeout(() => _('ocSaveResult').innerHTML = '', 5000);
     await loadOcConfig();
+  } catch (e) {
+    toast(t('保存失败: ') + (e.message || ''), 'error');
+  }
+}
+
+async function loadClineProxyConfig() {
+  try {
+    const d = await api('GET', '/cline-proxy/config');
+    const c = d.data;
+    _('clineProxyStrategy').value = c.proxyStrategy || 'round_robin';
+    _('clineProxies').value = (c.proxies || []).join('\n');
+  } catch (e) { /* ignore */ }
+}
+
+async function saveClineProxyConfig() {
+  const payload = {
+    proxyStrategy: _('clineProxyStrategy').value,
+    proxies: _('clineProxies').value.split('\n').map(s => s.trim()).filter(Boolean),
+  };
+  try {
+    await api('POST', '/cline-proxy/config/update', payload);
+    _('clineProxySaveResult').innerHTML = '<span style="color:var(--green)">✓ ' + t('Cline 代理配置已保存') + '</span>';
+    setTimeout(() => _('clineProxySaveResult').innerHTML = '', 5000);
+    await loadClineProxyConfig();
   } catch (e) {
     toast(t('保存失败: ') + (e.message || ''), 'error');
   }

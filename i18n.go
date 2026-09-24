@@ -186,6 +186,11 @@ var apiMessages = map[string]map[locale]string{
 		localeZH: "opencode 配置已保存",
 		localeEN: "OpenCode config saved",
 	},
+	// Cline 出口代理相关
+	"cline_proxy_saved": {
+		localeZH: "Cline 代理配置已保存",
+		localeEN: "Cline proxy config saved",
+	},
 	"invalid_base_url": {
 		localeZH: "无效的 Base URL，必须以 http:// 或 https:// 开头",
 		localeEN: "invalid base URL, must start with http:// or https://",
