@@ -33,6 +33,8 @@ const (
 	freeModelMimo26                      = "cline-free/mimo-v2.6-flash"
 	freeModelBunnyAlias                  = "free-bunny"
 	freeModelBunny                       = "stealth/space-bunny-alpha"
+	freeModelCanaryAlias                 = "free-canary"
+	freeModelCanary                      = "stealth/pixel-canary"
 	freeModelInsufficientCreditsCooldown = 24 * time.Hour
 )
 
@@ -696,6 +698,8 @@ func callClineAPI(params map[string]any, stream bool) (*http.Response, *Account,
 		return callFreeClineAPIForModel(params, stream, freeModelMimo26)
 	case freeModelBunnyAlias:
 		return callFreeClineAPIForModel(params, stream, freeModelBunny)
+	case freeModelCanaryAlias:
+		return callFreeClineAPIForModel(params, stream, freeModelCanary)
 	}
 
 	acc := pickAccountForModel(model)
