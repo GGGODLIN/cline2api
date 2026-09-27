@@ -607,6 +607,8 @@ func TestBuildUpstreamBodyClampsMaxTokens(t *testing.T) {
 		{"completion-tiny", map[string]any{"model": "m1", "max_completion_tokens": float64(8)}, defaultMaxTokens},
 		{"boundary-16", map[string]any{"model": "m1", "max_tokens": float64(16)}, 16},
 		{"normal", map[string]any{"model": "m1", "max_tokens": float64(1024)}, 1024},
+		{"completion-int", map[string]any{"model": "m1", "max_completion_tokens": 2048}, 2048},
+		{"max-tokens-precedes-completion", map[string]any{"model": "m1", "max_tokens": 1024, "max_completion_tokens": 2048}, 1024},
 	}
 	for _, tc := range cases {
 		body := buildUpstreamBody(tc.params, false)
