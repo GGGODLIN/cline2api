@@ -341,6 +341,7 @@ func TestAnthropicMessagesFreeFallsBackToDSAndPreservesResponseFormat(t *testing
 
 	var attempts []string
 	var models []string
+	var maxTokens []int
 	httpClient.Transport = freeModelRoundTripper(func(req *http.Request) (*http.Response, error) {
 		token := strings.TrimPrefix(req.Header.Get("Authorization"), "Bearer ")
 		attempts = append(attempts, token)
@@ -354,6 +355,9 @@ func TestAnthropicMessagesFreeFallsBackToDSAndPreservesResponseFormat(t *testing
 		}
 		model, _ := params["model"].(string)
 		models = append(models, model)
+		if value, ok := params["max_tokens"].(float64); ok {
+			maxTokens = append(maxTokens, int(value))
+		}
 		if model == freeModelPrimary {
 			return &http.Response{
 				StatusCode: http.StatusTooManyRequests,
@@ -418,6 +422,14 @@ func TestAnthropicMessagesFreeFallsBackToDSAndPreservesResponseFormat(t *testing
 	}
 	if got, want := strings.Join(models, ","), freeModelPrimary+","+freeModelPrimary+","+freeModelFallback; got != want {
 		t.Fatalf("models = %q, want %q", got, want)
+	}
+	if len(maxTokens) != len(attempts) {
+		t.Fatalf("captured max_tokens = %d, want one per attempt (%d)", len(maxTokens), len(attempts))
+	}
+	for i, got := range maxTokens {
+		if got != 32 {
+			t.Fatalf("max_tokens[%d] = %d, want 32", i, got)
+		}
 	}
 }
 

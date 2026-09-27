@@ -1130,6 +1130,123 @@ func TestCallClineAPIFreeV41DoesNotFailoverOnOtherPaymentRequired(t *testing.T) 
 	}
 }
 
+func TestCallClineAPIFreeUsesConfiguredChainOnly(t *testing.T) {
+	oldPool := pool
+	oldConfig := getProxyConfig()
+	oldTransport := httpClient.Transport
+	t.Cleanup(func() {
+		pool = oldPool
+		setProxyConfig(oldConfig)
+		httpClient.Transport = oldTransport
+	})
+
+	first := &Account{
+		AccountID: "chain-one", Email: "chain-one@example.com", AccessToken: "chain-one-token",
+		ExpiresAt: time.Now().Add(time.Hour).UnixMilli(), Status: "active",
+	}
+	second := &Account{
+		AccountID: "chain-two", Email: "chain-two@example.com", AccessToken: "chain-two-token",
+		ExpiresAt: time.Now().Add(time.Hour).UnixMilli(), Status: "active",
+	}
+	pool = &AccountPool{Accounts: []*Account{first, second}}
+	config := defaultProxyConfig()
+	config.ModelChain = []string{freeModelFallback}
+	setProxyConfig(config)
+
+	var attempts []string
+	var models []string
+	httpClient.Transport = freeModelRoundTripper(func(req *http.Request) (*http.Response, error) {
+		attempts = append(attempts, strings.TrimPrefix(req.Header.Get("Authorization"), "Bearer "))
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			return nil, err
+		}
+		var params map[string]any
+		if err := json.Unmarshal(body, &params); err != nil {
+			return nil, err
+		}
+		models = append(models, params["model"].(string))
+		return &http.Response{
+			StatusCode: http.StatusTooManyRequests,
+			Body:       io.NopCloser(strings.NewReader(`{"error":"quota"}`)),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	})
+
+	params := map[string]any{"model": "free"}
+	_, _, err := callFreeClineAPI(params, false)
+	if err == nil {
+		t.Fatal("callFreeClineAPI should fail when the configured chain is exhausted")
+	}
+	if got, want := strings.Join(attempts, ","), "chain-one-token,chain-two-token"; got != want {
+		t.Fatalf("attempts = %q, want %q", got, want)
+	}
+	if got, want := strings.Join(models, ","), freeModelFallback+","+freeModelFallback; got != want {
+		t.Fatalf("models = %q, want %q", got, want)
+	}
+	if got := params["model"]; got != freeModelFallback {
+		t.Fatalf("final model = %v, want %q", got, freeModelFallback)
+	}
+}
+
+func TestCallClineAPIFreeFallsBackAfterServerError(t *testing.T) {
+	oldPool := pool
+	oldConfig := getProxyConfig()
+	oldTransport := httpClient.Transport
+	t.Cleanup(func() {
+		pool = oldPool
+		setProxyConfig(oldConfig)
+		httpClient.Transport = oldTransport
+	})
+
+	account := &Account{
+		AccountID: "server-error", Email: "server-error@example.com", AccessToken: "server-error-token",
+		ExpiresAt: time.Now().Add(time.Hour).UnixMilli(), Status: "active",
+	}
+	pool = &AccountPool{Accounts: []*Account{account}}
+	config := defaultProxyConfig()
+	config.ModelChain = []string{freeModelPrimary, freeModelFallback}
+	setProxyConfig(config)
+
+	var models []string
+	httpClient.Transport = freeModelRoundTripper(func(req *http.Request) (*http.Response, error) {
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			return nil, err
+		}
+		var params map[string]any
+		if err := json.Unmarshal(body, &params); err != nil {
+			return nil, err
+		}
+		model := params["model"].(string)
+		models = append(models, model)
+		if model == freeModelPrimary {
+			return &http.Response{
+				StatusCode: http.StatusInternalServerError,
+				Body:       io.NopCloser(strings.NewReader(`{"error":"boom"}`)),
+				Header:     make(http.Header),
+				Request:    req,
+			}, nil
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"id":"ok","choices":[]}`)),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	})
+
+	resp, _, err := callFreeClineAPI(map[string]any{"model": "free"}, false)
+	if err != nil {
+		t.Fatalf("callFreeClineAPI returned error: %v", err)
+	}
+	resp.Body.Close()
+	if got, want := strings.Join(models, ","), freeModelPrimary+","+freeModelFallback; got != want {
+		t.Fatalf("models = %q, want %q", got, want)
+	}
+}
+
 func TestBuildUpstreamBodyNormalizesMuseMaxEffort(t *testing.T) {
 	for _, key := range []string{"reasoning_effort", "reasoningEffort"} {
 		t.Run(key, func(t *testing.T) {
@@ -1151,6 +1268,38 @@ func TestBuildUpstreamBodyPreservesMaxEffortForOtherModels(t *testing.T) {
 	}, false)
 	if got, want := body["reasoning_effort"], "max"; got != want {
 		t.Fatalf("reasoning_effort = %v, want %q", got, want)
+	}
+}
+
+func TestBuildUpstreamBodyAcceptsIntegerMaxTokens(t *testing.T) {
+	body := buildUpstreamBody(map[string]any{
+		"model":      freeModelPrimary,
+		"max_tokens": 65536,
+	}, false)
+	if got, want := body["max_tokens"], 65536; got != want {
+		t.Fatalf("max_tokens = %v, want %d", got, want)
+	}
+}
+
+func TestBuildUpstreamBodyClampsGeminiOutputLimit(t *testing.T) {
+	for _, maxTokens := range []any{float64(128000), 128000} {
+		body := buildUpstreamBody(map[string]any{
+			"model":      "cline-free/gemini-3.8-flash",
+			"max_tokens": maxTokens,
+		}, false)
+		if got, want := body["max_tokens"], 65536; got != want {
+			t.Fatalf("max_tokens = %v, want %d", got, want)
+		}
+	}
+}
+
+func TestBuildUpstreamBodyPreservesUnknownModelOutputLimit(t *testing.T) {
+	body := buildUpstreamBody(map[string]any{
+		"model":      "custom/unknown-model",
+		"max_tokens": 128000,
+	}, false)
+	if got, want := body["max_tokens"], 128000; got != want {
+		t.Fatalf("max_tokens = %v, want %d", got, want)
 	}
 }
 
@@ -1241,6 +1390,55 @@ func TestHandleAnthropicStreamMarksSSEErrorIncomplete(t *testing.T) {
 	}
 	if strings.Contains(body, "event: message_stop") {
 		t.Fatalf("error stream should not emit message_stop: %q", body)
+	}
+}
+
+func TestHandleAnthropicStreamEmitsToolInputJSONDelta(t *testing.T) {
+	isolateRequestLogs(t)
+	recorder := httptest.NewRecorder()
+	upstream := &http.Response{
+		StatusCode: http.StatusOK,
+		Body: io.NopCloser(strings.NewReader(
+			"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\":\\\"\"}}]}}]}\n\n" +
+				"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"Taipei\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n" +
+				"data: [DONE]\n\n",
+		)),
+	}
+	reqLog := RequestLog{ID: "anthropic-tool-input", Model: freeModelPrimary, StartedAt: time.Now()}
+
+	handleAnthropicStream(recorder, upstream, nil, &reqLog)
+
+	body := recorder.Body.String()
+	for _, want := range []string{
+		`event: content_block_start`,
+		`"type":"input_json_delta"`,
+		`"partial_json":"{\"city\":\"Taipei\"}"`,
+		`event: content_block_stop`,
+		`"stop_reason":"tool_use"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("response body missing %q: %s", want, body)
+		}
+	}
+}
+
+func TestHandleAnthropicStreamEmitsEmptyToolInput(t *testing.T) {
+	isolateRequestLogs(t)
+	recorder := httptest.NewRecorder()
+	upstream := &http.Response{
+		StatusCode: http.StatusOK,
+		Body: io.NopCloser(strings.NewReader(
+			"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"ping\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n" +
+				"data: [DONE]\n\n",
+		)),
+	}
+	reqLog := RequestLog{ID: "anthropic-empty-tool-input", Model: freeModelPrimary, StartedAt: time.Now()}
+
+	handleAnthropicStream(recorder, upstream, nil, &reqLog)
+
+	body := recorder.Body.String()
+	if !strings.Contains(body, `"partial_json":"{}"`) {
+		t.Fatalf("response body missing empty tool input: %s", body)
 	}
 }
 

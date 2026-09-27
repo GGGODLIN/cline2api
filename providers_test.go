@@ -81,6 +81,48 @@ func TestCustomProviderServesModel(t *testing.T) {
 }
 
 // provider 失败（冷却）后自动降级到回退链 → cline 池，客户端无感知。
+func TestCallProviderAcceptsIntegerAndClampsGeminiOutput(t *testing.T) {
+	oldTransport := httpClient.Transport
+	t.Cleanup(func() { httpClient.Transport = oldTransport })
+
+	for _, key := range []string{"max_tokens", "max_completion_tokens"} {
+		t.Run(key, func(t *testing.T) {
+			var upstream map[string]any
+			httpClient.Transport = freeModelRoundTripper(func(req *http.Request) (*http.Response, error) {
+				body, err := io.ReadAll(req.Body)
+				if err != nil {
+					return nil, err
+				}
+				if err := json.Unmarshal(body, &upstream); err != nil {
+					return nil, err
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(`{"id":"ok","choices":[]}`)),
+					Header:     make(http.Header),
+					Request:    req,
+				}, nil
+			})
+
+			params := map[string]any{
+				"model":    "cline-free/gemini-3.8-flash",
+				key:        128000,
+				"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+			}
+			resp, err := callProvider(&CustomProvider{
+				ID: "gemini", Name: "Gemini", BaseURL: "http://provider.test/v1", APIKey: "sk-test",
+			}, params, false)
+			if err != nil {
+				t.Fatalf("callProvider returned error: %v", err)
+			}
+			resp.Body.Close()
+			if got, want := upstream[key], float64(65536); got != want {
+				t.Fatalf("%s = %v, want %v", key, got, want)
+			}
+		})
+	}
+}
+
 func TestCustomProviderFailureFallsBackToChain(t *testing.T) {
 	oldPool := pool
 	oldConfig := getProxyConfig()

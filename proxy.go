@@ -698,18 +698,37 @@ func hasToolUseBlocks(content any) bool {
 	return false
 }
 
+func numericInt(value any) (int, bool) {
+	switch number := value.(type) {
+	case int:
+		return number, true
+	case int32:
+		return int(number), true
+	case int64:
+		return int(number), true
+	case float32:
+		return int(number), true
+	case float64:
+		return int(number), true
+	case json.Number:
+		parsed, err := number.Int64()
+		return int(parsed), err == nil
+	default:
+		return 0, false
+	}
+}
+
 func buildUpstreamBody(params map[string]any, stream bool) map[string]any {
 	sessionID := fmt.Sprintf("sess_%d", time.Now().UnixMilli())
 
 	maxTokens := defaultMaxTokens
 	source := ""
-	if mt, ok := params["max_tokens"].(float64); ok {
-		maxTokens, source = int(mt), "max_tokens"
-	} else if mt, ok := params["max_completion_tokens"].(float64); ok {
-		maxTokens, source = int(mt), "max_completion_tokens"
+	if value, ok := numericInt(params["max_tokens"]); ok {
+		maxTokens, source = value, "max_tokens"
+	} else if value, ok := numericInt(params["max_completion_tokens"]); ok {
+		maxTokens, source = value, "max_completion_tokens"
 	}
-	// 客户端发的 0 视为未设置、1~15 低于上游硬下限：一律兜到默认值，
-	// 否则 muse-spark 等模型直接 400 且错误会被回退链吞掉
+	// 客戶端發的 0 視為未設定；1～15 低於上游硬下限，兩者都回到預設值。
 	if maxTokens < minUpstreamMaxTokens {
 		if source != "" {
 			log.Printf("  clamp %s=%d -> %d (upstream requires >= %d)", source, maxTokens, defaultMaxTokens, minUpstreamMaxTokens)
@@ -720,6 +739,10 @@ func buildUpstreamBody(params map[string]any, stream bool) map[string]any {
 	model := getDefaultModel()
 	if m, ok := params["model"].(string); ok && m != "" {
 		model = m
+	}
+	if limit := modelMaxOutputLimit(model); limit > 0 && maxTokens > limit {
+		log.Printf("  clamp max_tokens=%d -> %d (model %s output limit)", maxTokens, limit, model)
+		maxTokens = limit
 	}
 
 	body := map[string]any{

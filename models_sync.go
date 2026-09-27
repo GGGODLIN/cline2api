@@ -35,6 +35,42 @@ type clineRecommendedResponse struct {
 	ClinePass   []clineRemoteModel `json:"clinePass"`
 }
 
+type modelTokenLimits struct {
+	Context int
+	Output  int
+}
+
+// Cline 的推薦模型端點目前不保證回傳 token metadata；已知硬限制只作缺值備援。
+var knownModelTokenLimits = map[string]modelTokenLimits{
+	"gemini-3.8-flash": {Context: 1048576, Output: 65536},
+}
+
+func baseModelID(id string) string {
+	id = strings.TrimSpace(id)
+	for _, prefix := range []string{"cline-free/", "cline-pass/", "google/"} {
+		if strings.HasPrefix(id, prefix) {
+			return strings.TrimPrefix(id, prefix)
+		}
+	}
+	return id
+}
+
+func modelMaxOutputLimit(id string) int {
+	p := loadPool()
+	poolMu.Lock()
+	defer poolMu.Unlock()
+	for _, model := range p.Models {
+		if model.ID == id && model.Output >= minUpstreamMaxTokens {
+			return model.Output
+		}
+	}
+	limit := knownModelTokenLimits[baseModelID(id)].Output
+	if limit < minUpstreamMaxTokens {
+		return 0
+	}
+	return limit
+}
+
 // modelSyncResult 是一次模型同步的结果（供管理后台弹窗展示）。
 type modelSyncResult struct {
 	Changed  bool     `json:"changed"`
@@ -46,16 +82,16 @@ type modelSyncResult struct {
 }
 
 var (
-	modelSyncMu    sync.Mutex
-	lastModelSync  modelSyncResult
-	modelSyncRan   bool // 启动后是否已同步过（避免重复）
-	modelSyncBusy  bool // 同步进行中（防并发触发）
+	modelSyncMu   sync.Mutex
+	lastModelSync modelSyncResult
+	modelSyncRan  bool // 启动后是否已同步过（避免重复）
+	modelSyncBusy bool // 同步进行中（防并发触发）
 )
 
 // remoteModelsEnabled 远程同步成功后置 true：此后 getAllModels 以远程模型为主，
 // 内置硬编码模型（已失效）仅作为离线 fallback。
 var (
-	remoteModelsEnabled bool
+	remoteModelsEnabled   bool
 	remoteModelsEnabledMu sync.Mutex
 )
 
@@ -101,6 +137,28 @@ func remoteProvider(id string) string {
 	return "cline"
 }
 
+func syncedRemoteModel(remote clineRemoteModel, inFree bool) Model {
+	limits := knownModelTokenLimits[baseModelID(remote.ID)]
+	contextWindow := remote.ContextWin
+	if contextWindow == 0 {
+		contextWindow = limits.Context
+	}
+	output := remote.MaxTokens
+	if output == 0 {
+		output = limits.Output
+	}
+	return Model{
+		ID:       remote.ID,
+		Provider: remoteProvider(remote.ID),
+		Cost:     remoteCost(remote, inFree),
+		Status:   "active",
+		Custom:   false,
+		Source:   "remote",
+		Context:  contextWindow,
+		Output:   output,
+	}
+}
+
 // syncClineModels 执行一次模型同步并持久化：
 //  1. 拉取远程推荐模型（free / clinePass / recommended）
 //  2. 与池中现有 remote 模型比较，得到 added / removed
@@ -142,14 +200,7 @@ func syncClineModels() modelSyncResult {
 				continue
 			}
 			seen[m.ID] = true
-			remote = append(remote, Model{
-				ID:       m.ID,
-				Provider: remoteProvider(m.ID),
-				Cost:     remoteCost(m, inFree),
-				Status:   "active",
-				Custom:   false,
-				Source:   "remote",
-			})
+			remote = append(remote, syncedRemoteModel(m, inFree))
 		}
 	}
 	addGroup(data.Free, true)
