@@ -12,8 +12,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"golang.org/x/net/http/httpproxy"
 )
 
 // ============================================================================
@@ -145,11 +143,9 @@ func pickFromClineProxies(proxies []string, strategy string) string {
 	return proxies[idx]
 }
 
-// clineEnvProxy 每次重新讀環境變數，避免 http.ProxyFromEnvironment 的程序級快取
-// 讓測試或執行期更新的 HTTPS_PROXY 永遠讀到第一次呼叫的舊值。
-var clineEnvProxy = func(req *http.Request) (*url.URL, error) {
-	return httpproxy.FromEnvironment().ProxyFunc()(req.URL)
-}
+// clineEnvProxy 环境变量代理回退（可注入接缝，测试用替身避免污染
+// http.ProxyFromEnvironment 的进程级缓存）。
+var clineEnvProxy = http.ProxyFromEnvironment
 
 // clineOutboundProxy 作为全局 transport 的 Proxy 钩子：应用内代理池生效时禁用
 // 环境变量代理（隧道在 DialContext 内建立，叠加会双重代理），否则维持原行为。
