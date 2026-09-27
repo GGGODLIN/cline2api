@@ -1079,6 +1079,35 @@ func TestSortModelsByAvailabilityPrefersAvailableThenLeastUsed(t *testing.T) {
 	}
 }
 
+func TestHandleAnthropicStreamPreservesUpstreamModel(t *testing.T) {
+	requestLogsMu.Lock()
+	oldLogs := requestLogs
+	requestLogs = nil
+	requestLogsMu.Unlock()
+	t.Cleanup(func() {
+		requestLogsMu.Lock()
+		requestLogs = oldLogs
+		requestLogsMu.Unlock()
+	})
+
+	recorder := httptest.NewRecorder()
+	upstream := &http.Response{
+		StatusCode: http.StatusOK,
+		Body: io.NopCloser(strings.NewReader(
+			"data: {\"model\":\"google/gemini-3.8-flash\",\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n" +
+				"data: [DONE]\n\n",
+		)),
+	}
+	reqLog := RequestLog{ID: "anthropic-stream-model", Model: "cline-free/gemini-3.8-flash", StartedAt: time.Now()}
+
+	handleAnthropicStream(recorder, upstream, nil, &reqLog)
+
+	body := recorder.Body.String()
+	if !strings.Contains(body, `"model":"google/gemini-3.8-flash"`) {
+		t.Fatalf("response body missing upstream model: %s", body)
+	}
+}
+
 func TestOnlyFreeConfigRoundTrip(t *testing.T) {
 	oldConfig := getProxyConfig()
 	t.Cleanup(func() { setProxyConfig(oldConfig) })
