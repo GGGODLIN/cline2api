@@ -616,6 +616,19 @@ func TestBuildUpstreamBodyClampsMaxTokens(t *testing.T) {
 	}
 }
 
+func TestBuildUpstreamBodyPreservesAnthropicIntegerMaxTokens(t *testing.T) {
+	params := anthropicToOpenAI(anthropicReq{
+		Model:     "m1",
+		MaxTokens: 1024,
+		Messages:  []anthropicMsg{{Role: "user", Content: "hi"}},
+	})
+
+	body := buildUpstreamBody(params, false)
+	if got, _ := body["max_tokens"].(int); got != 1024 {
+		t.Fatalf("max_tokens = %d, want 1024", got)
+	}
+}
+
 func TestOpenAIToAnthropicThinkingBlock(t *testing.T) {
 	out := openAIToAnthropic(map[string]any{
 		"model": "m1",

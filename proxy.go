@@ -692,15 +692,26 @@ func hasToolUseBlocks(content any) bool {
 	return false
 }
 
+func numericInt(value any) (int, bool) {
+	switch number := value.(type) {
+	case int:
+		return number, true
+	case float64:
+		return int(number), true
+	default:
+		return 0, false
+	}
+}
+
 func buildUpstreamBody(params map[string]any, stream bool) map[string]any {
 	sessionID := fmt.Sprintf("sess_%d", time.Now().UnixMilli())
 
 	maxTokens := defaultMaxTokens
 	source := ""
-	if mt, ok := params["max_tokens"].(float64); ok {
-		maxTokens, source = int(mt), "max_tokens"
-	} else if mt, ok := params["max_completion_tokens"].(float64); ok {
-		maxTokens, source = int(mt), "max_completion_tokens"
+	if value, ok := numericInt(params["max_tokens"]); ok {
+		maxTokens, source = value, "max_tokens"
+	} else if value, ok := numericInt(params["max_completion_tokens"]); ok {
+		maxTokens, source = value, "max_completion_tokens"
 	}
 	// 客户端发的 0 视为未设置、1~15 低于上游硬下限：一律兜到默认值，
 	// 否则 muse-spark 等模型直接 400 且错误会被回退链吞掉
