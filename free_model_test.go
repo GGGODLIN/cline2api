@@ -1399,7 +1399,7 @@ func TestHandleAnthropicStreamEmitsToolInputJSONDelta(t *testing.T) {
 	upstream := &http.Response{
 		StatusCode: http.StatusOK,
 		Body: io.NopCloser(strings.NewReader(
-			"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\":\\\"\"}}]}}]}\n\n" +
+			"data: {\"model\":\"google/gemini-3.8-flash\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\":\\\"\"}}]}}]}\n\n" +
 				"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"Taipei\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n" +
 				"data: [DONE]\n\n",
 		)),
@@ -1410,6 +1410,7 @@ func TestHandleAnthropicStreamEmitsToolInputJSONDelta(t *testing.T) {
 
 	body := recorder.Body.String()
 	for _, want := range []string{
+		`"model":"google/gemini-3.8-flash"`,
 		`event: content_block_start`,
 		`"type":"input_json_delta"`,
 		`"partial_json":"{\"city\":\"Taipei\"}"`,

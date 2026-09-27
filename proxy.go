@@ -2341,17 +2341,27 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 
 	msgID := "msg_" + fmt.Sprintf("%x", time.Now().UnixMilli())
 	stopReason := "end_turn"
-	emit("message_start", map[string]any{
-		"type": "message_start",
-		"message": map[string]any{
-			"id":          msgID,
-			"type":        "message",
-			"role":        "assistant",
-			"content":     []any{},
-			"model":       "",
-			"stop_reason": nil,
-		},
-	})
+	messageStarted := false
+	emitMessageStart := func(model string) {
+		if messageStarted {
+			return
+		}
+		messageStarted = true
+		if model == "" {
+			model = reqLog.Model
+		}
+		emit("message_start", map[string]any{
+			"type": "message_start",
+			"message": map[string]any{
+				"id":          msgID,
+				"type":        "message",
+				"role":        "assistant",
+				"content":     []any{},
+				"model":       model,
+				"stop_reason": nil,
+			},
+		})
+	}
 
 	textIndex := new(int)
 	*textIndex = -1
@@ -2419,6 +2429,8 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 				obj = d
 			}
 		}
+		model, _ := obj["model"].(string)
+		emitMessageStart(model)
 		if usage := parseTokenUsage(obj["usage"]); usage.Valid {
 			latestUsage = mergeTokenUsage(latestUsage, usage)
 		}
@@ -2549,6 +2561,7 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 		}
 	}
 
+	emitMessageStart(reqLog.Model)
 	if streamErr != "" {
 		finalizeRequestLog(reqLog, latestUsage, firstOutputAt, reqLog.StartedAt, false, "upstream SSE error: "+streamErr)
 		return
