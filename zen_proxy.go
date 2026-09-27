@@ -62,6 +62,10 @@ func buildZenTransport() *http.Transport {
 	return t
 }
 
+// zenTLSHandshakeTimeout 限制 TLS 握手时长：GFW 式黑洞（TCP 通、TLS 静默丢弃）
+// 会让无超时的握手永久挂起，请求既不失败也不返回（故障转移也无法激活）。
+const zenTLSHandshakeTimeout = 15 * time.Second
+
 func zenHTTP2Transport() *http2.Transport {
 	return &http2.Transport{
 		DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
@@ -78,7 +82,10 @@ func zenHTTP2Transport() *http2.Transport {
 				ServerName: host,
 				NextProtos: []string{"h2", "http/1.1"},
 			}, utls.HelloChrome_120)
-			if err := uconn.HandshakeContext(ctx); err != nil {
+			// 握手限时；握手成功后 cancel 不影响已建立的连接
+			hsCtx, cancel := context.WithTimeout(ctx, zenTLSHandshakeTimeout)
+			defer cancel()
+			if err := uconn.HandshakeContext(hsCtx); err != nil {
 				raw.Close()
 				return nil, err
 			}
@@ -90,7 +97,11 @@ func zenHTTP2Transport() *http2.Transport {
 func zenDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
 	p, _ := pickZenProxy()
 	if p == "" {
-		d := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
+		// 未配置 zen 代理时回退系统代理（HTTPS_PROXY / HTTP_PROXY），再直连
+		if u, envErr := http.ProxyFromEnvironment(&http.Request{URL: &url.URL{Scheme: "https", Host: addr}}); envErr == nil && u != nil {
+			return dialViaProxy(ctx, u.String(), network, addr)
+		}
+		d := &net.Dialer{Timeout: 12 * time.Second, KeepAlive: 30 * time.Second}
 		return d.DialContext(ctx, network, addr)
 	}
 	return dialViaProxy(ctx, p, network, addr)
@@ -231,14 +242,16 @@ func dialViaProxy(ctx context.Context, raw, network, addr string) (net.Conn, err
 
 // dialHTTPProxy 经 http(s) 代理建立 CONNECT 隧道。
 func dialHTTPProxy(ctx context.Context, u *url.URL, network, addr string) (net.Conn, error) {
-	d := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
+	d := &net.Dialer{Timeout: 12 * time.Second, KeepAlive: 30 * time.Second}
 	rawConn, err := d.DialContext(ctx, "tcp", u.Host)
 	if err != nil {
 		return nil, err
 	}
 	if u.Scheme == "https" {
 		tlsConn := tls.Client(rawConn, &tls.Config{MinVersion: tls.VersionTLS12, ServerName: u.Hostname()})
-		if err := tlsConn.HandshakeContext(ctx); err != nil {
+		hsCtx, hsCancel := context.WithTimeout(ctx, zenTLSHandshakeTimeout)
+		defer hsCancel()
+		if err := tlsConn.HandshakeContext(hsCtx); err != nil {
 			rawConn.Close()
 			return nil, err
 		}

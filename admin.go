@@ -86,10 +86,18 @@ func registerAdminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/admin/api/opencode/config", auth(handleOpenCodeConfig))
 	mux.HandleFunc("/admin/api/opencode/config/update", auth(handleOpenCodeConfigUpdate))
 	mux.HandleFunc("/admin/api/opencode/models/sync", auth(handleOpenCodeModelSync))
+	mux.HandleFunc("/admin/api/cline-proxy/config", auth(handleClineProxyConfig))
+	mux.HandleFunc("/admin/api/cline-proxy/config/update", auth(handleClineProxyConfigUpdate))
 	mux.HandleFunc("/admin/api/models/add", auth(handleAdminModelAdd))
 	mux.HandleFunc("/admin/api/models/delete", auth(handleAdminModelDelete))
+	mux.HandleFunc("/admin/api/models/context", auth(handleAdminModelContext))
 	mux.HandleFunc("/admin/api/config", auth(handleAdminConfig))
 	mux.HandleFunc("/admin/api/config/update", auth(handleAdminUpdateConfig))
+	mux.HandleFunc("/admin/api/providers", auth(handleProvidersList))
+	mux.HandleFunc("/admin/api/providers/save", auth(handleProviderSave))
+	mux.HandleFunc("/admin/api/providers/delete", auth(handleProviderDelete))
+	mux.HandleFunc("/admin/api/providers/test", auth(handleProviderTest))
+	mux.HandleFunc("/admin/api/providers/presets", auth(handleProviderPresets))
 	mux.HandleFunc("/admin/api/password", auth(handleAdminPassword))
 	mux.HandleFunc("/admin/api/request-logs", auth(handleAdminRequestLogs))
 	mux.HandleFunc("/admin/api/open-external", auth(handleOpenExternal))
@@ -304,6 +312,21 @@ func handleAdminAccountAdd(w http.ResponseWriter, r *http.Request) {
 			writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "refresh_token_required")})
 			return
 		}
+
+	// 去重：该 refreshToken 已存在时直接返回，不重复添加
+	if existing := findAccountByRefreshToken(req.RefreshToken); existing != nil {
+		writeAPI(w, http.StatusOK, apiResponse{
+			Success: true,
+			Message: tAPI(r, "account_exists", existing.Email),
+			Data: map[string]any{
+				"accountId": existing.AccountID,
+				"email":     existing.Email,
+				"status":    existing.Status,
+				"duplicate": true,
+			},
+		})
+		return
+	}
 
 		// Validate by refreshing
 		resp, err := refreshClineToken(req.RefreshToken)
@@ -537,7 +560,9 @@ func handleSSOImport(w http.ResponseWriter, r *http.Request) {
 	// SSO cookie format expected: workos_session=xxx or similar
 	lines := strings.Split(req.SSOCookies, "\n")
 	imported := 0
+	duplicates := 0
 	errors := []string{}
+	seen := make(map[string]bool)
 
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
@@ -546,7 +571,15 @@ func handleSSOImport(w http.ResponseWriter, r *http.Request) {
 		}
 		// Try to use the cookie as a refresh token directly (common format)
 		if strings.HasPrefix(line, "workos:") || len(line) > 20 {
-			token := strings.TrimPrefix(line, "workos:")
+			token := strings.TrimSpace(strings.TrimPrefix(line, "workos:"))
+			if token == "" {
+				continue
+			}
+			// 去重：与账号池中已有账号或本批次内重复的 token，跳过而不是重复添加
+			if isDuplicateImportToken(token, seen) {
+				duplicates++
+				continue
+			}
 			resp, err := refreshClineToken(token)
 			if err != nil {
 				errors = append(errors, fmt.Sprintf("token %s...: %v", truncate(token, 16), err))
@@ -572,8 +605,9 @@ func handleSSOImport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	result := map[string]any{
-		"imported": imported,
-		"failed":   len(errors),
+		"imported":   imported,
+		"failed":     len(errors),
+		"duplicates": duplicates,
 	}
 	if len(errors) > 0 {
 		result["errors"] = errors
@@ -581,7 +615,7 @@ func handleSSOImport(w http.ResponseWriter, r *http.Request) {
 
 		writeAPI(w, http.StatusOK, apiResponse{
 			Success: true,
-			Message: tAPI(r, "imported_accounts", imported, len(errors)),
+			Message: tAPI(r, "imported_accounts", imported, len(errors), duplicates),
 			Data:    result,
 		})
 }
@@ -616,13 +650,21 @@ func handleBatchImport(w http.ResponseWriter, r *http.Request) {
 		}
 
 	imported := 0
+	duplicates := 0
 	errors := []string{}
+	seen := make(map[string]bool)
 
 	for _, t := range req.Tokens {
-		if t.RefreshToken == "" {
+		token := strings.TrimSpace(t.RefreshToken)
+		if token == "" {
 			continue
 		}
-		resp, err := refreshClineToken(t.RefreshToken)
+		// 去重：与账号池中已有账号或本批次内重复的 token，跳过而不是重复添加
+		if isDuplicateImportToken(token, seen) {
+			duplicates++
+			continue
+		}
+		resp, err := refreshClineToken(token)
 		if err != nil {
 			errors = append(errors, fmt.Sprintf("%s: %v", t.Email, err))
 			continue
@@ -634,7 +676,7 @@ func handleBatchImport(w http.ResponseWriter, r *http.Request) {
 		acc := &Account{
 			AccountID:    fmt.Sprintf("acc_%d", time.Now().UnixMilli()),
 			Email:        email,
-			RefreshToken: t.RefreshToken,
+			RefreshToken: token,
 			AccessToken:  "workos:" + resp.Data.AccessToken,
 			ExpiresAt:    parseExpiry(resp.Data.ExpiresAt) - 60000,
 			Status:       "active",
@@ -646,11 +688,12 @@ func handleBatchImport(w http.ResponseWriter, r *http.Request) {
 
 		writeAPI(w, http.StatusOK, apiResponse{
 			Success: true,
-			Message: tAPI(r, "imported_accounts", imported, len(errors)),
+			Message: tAPI(r, "imported_accounts", imported, len(errors), duplicates),
 		Data: map[string]any{
-			"imported": imported,
-			"failed":   len(errors),
-			"errors":   errors,
+			"imported":   imported,
+			"failed":     len(errors),
+			"duplicates": duplicates,
+			"errors":     errors,
 		},
 	})
 }
@@ -825,6 +868,10 @@ var (
 type proxyConfigData struct {
 	Strategy string            `json:"strategy"`
 	Headers  map[string]string `json:"headers"`
+	// ModelChain 冷却/降级时的模型回退顺序（管理员可配）。
+	// 空 = 使用内置 free 链（glm-5.3-flash → deepseek-v4-flash → longcat-2.0）。
+	ModelChain []string `json:"modelChain,omitempty"`
+	OnlyFree   bool     `json:"onlyFree"` // 只显示免费模型：开启后 /models、/v1/models 仅返回免费模型
 }
 
 func defaultProxyConfig() *proxyConfigData {
@@ -947,10 +994,13 @@ func handleAdminConfig(w http.ResponseWriter, r *http.Request) {
 		"address":      fmt.Sprintf("%s:%d", effectiveAdminHost(listenHost), listenPort),
 		"host":         listenHost,
 		"strategy":     cfg.Strategy,
+		"modelChain":   cfg.ModelChain,
 		"version":      appVersion,
+		"zenHeaders":   getZenConfig().ZenHeaders,
 		"poolPath":     poolPath,
 		"defaultModel": getDefaultModel(),
 		"headers":      cfg.Headers,
+		"onlyFree":     cfg.OnlyFree,
 		"localIPs":     detectLocalIPs(),
 		"hasPassword":  loadPool().AdminPasswordHash != "",
 	}})
@@ -974,6 +1024,8 @@ func handleAdminUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		Headers      map[string]string `json:"headers"`
 		DefaultModel string            `json:"defaultModel"`
 		Host         string            `json:"host"`
+		ModelChain   *[]string         `json:"modelChain"`
+		OnlyFree     *bool             `json:"onlyFree"`
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
 		writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "invalid_json")})
@@ -999,6 +1051,35 @@ func handleAdminUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		for k, v := range req.Headers {
 			cfg.Headers[k] = v
 		}
+		changed = true
+	}
+
+	if req.ModelChain != nil {
+		// 校验回退链：允许 "free" 别名或存在的模型 ID；去空去重
+		known := map[string]bool{"free": true}
+		for _, m := range getAllModels() {
+			known[m.ID] = true
+		}
+		var chain []string
+		seen := map[string]bool{}
+		for _, raw := range *req.ModelChain {
+			id := strings.TrimSpace(raw)
+			if id == "" || seen[id] {
+				continue
+			}
+			if !known[id] {
+				writeAPI(w, http.StatusBadRequest, apiResponse{Error: fmt.Sprintf("unknown model in modelChain: %s", id)})
+				return
+			}
+			seen[id] = true
+			chain = append(chain, id)
+		}
+		cfg.ModelChain = chain
+		changed = true
+	}
+
+	if req.OnlyFree != nil {
+		cfg.OnlyFree = *req.OnlyFree
 		changed = true
 	}
 
@@ -1061,6 +1142,7 @@ func handleAdminUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	writeAPI(w, http.StatusOK, apiResponse{Success: true, Data: map[string]any{
 		"strategy":      cfg.Strategy,
 		"headers":       cfg.Headers,
+		"onlyFree":      cfg.OnlyFree,
 		"defaultModel":  getDefaultModel(),
 		"host":          listenHost,
 		"address":       fmt.Sprintf("%s:%d", effectiveAdminHost(listenHost), listenPort),
@@ -1207,6 +1289,62 @@ func handleAdminModelDelete(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: tAPI(r, "model_deleted")})
 }
 
+// POST /admin/api/models/context  body: { id, context, output }
+// 手动设置模型的上下文窗口 / 最大输出 token（压缩阈值与 maybeCompact 按此计算）。
+// 0 = 清除为未知（zen 同步会回填默认值）。设置后 zen 模型同步保留该值不再覆盖。
+func handleAdminModelContext(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
+		return
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: err.Error()})
+		return
+	}
+	defer r.Body.Close()
+
+	var req struct {
+		ID      string `json:"id"`
+		Context int    `json:"context"`
+		Output  int    `json:"output"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "invalid_json")})
+		return
+	}
+	if req.ID == "" {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "model_id_required")})
+		return
+	}
+	if req.Context < 0 || req.Output < 0 {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "invalid_json")})
+		return
+	}
+
+	p := loadPool()
+	poolMu.Lock()
+	found := false
+	for i, m := range p.Models {
+		if m.ID == req.ID {
+			p.Models[i].Context = req.Context
+			p.Models[i].Output = req.Output
+			// 双清零=回到未知（同步回填默认）；否则视为用户锁定，同步不再覆盖
+			p.Models[i].MetaLocked = !(req.Context == 0 && req.Output == 0)
+			found = true
+			break
+		}
+	}
+	poolMu.Unlock()
+	if !found {
+		writeAPI(w, http.StatusNotFound, apiResponse{Error: tAPI(r, "model_not_found")})
+		return
+	}
+	savePool()
+	log.Printf("  model context updated: %s ctx=%d out=%d", req.ID, req.Context, req.Output)
+	writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: tAPI(r, "model_context_saved")})
+}
+
 // GET /admin/api/stats
 func handleAdminStats(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "GET" {
@@ -1246,6 +1384,7 @@ func handleAdminStats(w http.ResponseWriter, r *http.Request) {
 			"totalTokens":      totalTokens,
 			"cachedTokens":     cachedTokens,
 			"strategy":         getProxyConfig().Strategy,
+			"modelChain":       getProxyConfig().ModelChain,
 			"version":          appVersion,
 			// opencode zen 免费模型今日用量（从请求日志聚合）
 			"opencodeToday": opencodeUsageToday(),
@@ -1335,6 +1474,7 @@ func handleOpenCodeConfigUpdate(w http.ResponseWriter, r *http.Request) {
 		Failover        *bool             `json:"failover"`
 		FailoverCount   *int              `json:"failoverCount"`
 		FailoverMinutes *int              `json:"failoverMinutes"`
+		ZenHeaders      *map[string]string `json:"zenHeaders"`
 		Compaction      *zenCompactConfig `json:"compaction"`
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
@@ -1410,6 +1550,17 @@ func handleOpenCodeConfigUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 		cfg.FailoverMinutes = *req.FailoverMinutes
 	}
+	if req.ZenHeaders != nil {
+		cleaned := map[string]string{}
+		for k, v := range *req.ZenHeaders {
+			k = strings.TrimSpace(k)
+			if k == "" || strings.TrimSpace(v) == "" {
+				continue
+			}
+			cleaned[k] = strings.TrimSpace(v)
+		}
+		cfg.ZenHeaders = cleaned
+	}
 	if req.Compaction != nil {
 		c := req.Compaction
 		if c.Buffer < 0 || c.KeepTokens < 0 || c.MaxSummary < 0 {
@@ -1426,6 +1577,77 @@ func handleOpenCodeConfigUpdate(w http.ResponseWriter, r *http.Request) {
 	setZenConfig(cfg)
 	log.Printf("admin: opencode config updated (enabled=%v)", cfg.Enabled)
 	writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: tAPI(r, "opencode_config_saved")})
+}
+
+// GET /admin/api/cline-proxy/config — Cline 出口代理配置（代理地址脱敏返回）
+func handleClineProxyConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
+		return
+	}
+	cfg := getClineProxyConfig()
+	maskedProxies := make([]string, 0, len(cfg.Proxies))
+	for _, p := range cfg.Proxies {
+		maskedProxies = append(maskedProxies, maskProxyURL(p))
+	}
+	writeAPI(w, http.StatusOK, apiResponse{Success: true, Data: map[string]any{
+		"proxies":       maskedProxies,
+		"proxyStrategy": cfg.ProxyStrategy,
+	}})
+}
+
+// POST /admin/api/cline-proxy/config/update — 更新 Cline 出口代理配置
+func handleClineProxyConfigUpdate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
+		return
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: err.Error()})
+		return
+	}
+	defer r.Body.Close()
+
+	var req struct {
+		Proxies       []string `json:"proxies"`
+		ProxyStrategy *string  `json:"proxyStrategy"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "invalid_json")})
+		return
+	}
+
+	if req.Proxies != nil {
+		if err := validateProxyList(req.Proxies); err != nil {
+			writeAPI(w, http.StatusBadRequest, apiResponse{Error: err.Error()})
+			return
+		}
+	}
+	cfg := getClineProxyConfig()
+	updated := &clineProxyConfigData{
+		Proxies:       cfg.Proxies,
+		ProxyStrategy: cfg.ProxyStrategy,
+	}
+	if req.Proxies != nil {
+		updated.Proxies = req.Proxies
+	}
+	if req.ProxyStrategy != nil {
+		switch *req.ProxyStrategy {
+		case "round_robin", "random", "fill":
+			updated.ProxyStrategy = *req.ProxyStrategy
+		default:
+			writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "invalid_proxy_strategy")})
+			return
+		}
+	}
+	setClineProxyConfig(updated)
+	if err := getClineProxyPersistErr(); err != nil {
+		writeAPI(w, http.StatusInternalServerError, apiResponse{Error: err.Error()})
+		return
+	}
+	log.Printf("admin: cline proxy config updated (%d proxies, %s)", len(updated.Proxies), updated.ProxyStrategy)
+	writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: tAPI(r, "cline_proxy_saved")})
 }
 
 // POST /admin/api/opencode/models/sync — 手动触发一次 opencode 模型同步

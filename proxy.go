@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -38,6 +39,11 @@ const (
 	freeModelInsufficientCreditsCooldown = 24 * time.Hour
 )
 
+// minUpstreamMaxTokens 上游对输出 token 的硬下限：Cline 免费模型经 OpenRouter
+// 转发时（如 meta/muse-spark），max_output_tokens < 16 会被上游直接 400。
+const minUpstreamMaxTokens = 16
+
+// 遠端同步成功後，defaultFreeChain 會用 live catalog 擴充這份離線 seed。
 var freeModelChain = []string{freeModelPrimary, freeModelFallback}
 
 // builtinModels 是内置默认模型列表（不可删除），仅作为离线 / 未同步时的 fallback。
@@ -227,6 +233,15 @@ type chatRequest struct {
 	Extra               map[string]any  `json:"-"`
 }
 
+// isFreeModelEntry 判断模型是否免费（/models 过滤用）：
+// Cost 直接标记 free，或 zen 来源且命中免费判定（种子白名单兜底）。
+func isFreeModelEntry(m Model) bool {
+	if m.Cost == "free" {
+		return true
+	}
+	return isZenSource(m) && isZenFreeModel(m)
+}
+
 func startProxy(host string, port int) error {
 	p := loadPool()
 	loadRequestLogs()
@@ -315,19 +330,23 @@ func startProxy(host string, port int) error {
 	}
 
 	modelsHandler := apiKeyHandler(func(w http.ResponseWriter, r *http.Request) {
+		onlyFree := getProxyConfig().OnlyFree
 		all := getAllModels()
-		list := make([]map[string]any, len(all))
-		for i, m := range all {
+		list := make([]map[string]any, 0, len(all))
+		for _, m := range all {
+			if onlyFree && !isFreeModelEntry(m) {
+				continue
+			}
 			ownedBy := "cline"
 			if m.Source == "zen" || m.Provider == "opencode" {
 				ownedBy = "opencode"
 			}
-			list[i] = map[string]any{
+			list = append(list, map[string]any{
 				"id":       m.ID,
 				"object":   "model",
 				"created":  time.Now().UnixMilli(),
 				"owned_by": ownedBy,
-			}
+			})
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": list})
 	})
@@ -337,15 +356,6 @@ func startProxy(host string, port int) error {
 	chatHandler := apiKeyHandler(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
-			return
-		}
-		if activeCount == 0 && len(loadPool().Accounts) == 0 {
-			writeJSON(w, http.StatusUnauthorized, map[string]any{
-				"error": map[string]string{
-					"message": "No accounts in pool. Run with --add-account or POST /admin/login to add accounts.",
-					"type":    "auth_error",
-				},
-			})
 			return
 		}
 
@@ -414,6 +424,24 @@ func startProxy(host string, port int) error {
 			}
 			resp, err := callZenAPI(params, isStream)
 			if err != nil {
+				if fbResp, fbAcc, fbErr, attempted := zenFailoverToCline(params, isStream); attempted {
+					if fbErr == nil {
+						log.Printf("  chat failover: serving %q via cline pool", model)
+						reqLog.Upstream = upstreamCline
+						if fbAcc != nil {
+							reqLog.AccountID = fbAcc.AccountID
+							reqLog.AccountEmail = fbAcc.Email
+						}
+						defer fbResp.Body.Close()
+						if isStream {
+							handleStreamResponse(w, fbResp, fbAcc, &reqLog)
+						} else {
+							handleNonStreamResponse(w, fbResp, fbAcc, &reqLog)
+						}
+						return
+					}
+					err = fbErr
+				}
 				log.Printf("  api error: %v", err)
 				finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, err.Error())
 				writeJSON(w, http.StatusBadGateway, map[string]any{
@@ -430,6 +458,7 @@ func startProxy(host string, port int) error {
 			return
 		}
 
+		// cline 池路径才要求账号；zen 免费模型不依赖本地账号池
 		if activeCount == 0 && len(loadPool().Accounts) == 0 {
 			writeJSON(w, http.StatusUnauthorized, map[string]any{
 				"error": map[string]string{
@@ -442,7 +471,10 @@ func startProxy(host string, port int) error {
 
 		resp, acc, err := callClineAPI(params, isStream)
 		if effectiveModel, ok := params["model"].(string); ok && effectiveModel != "" {
-			reqLog.Model = effectiveModel
+			reqLog.Model = effectiveModel // 含回退后的实际服务模型
+			if _, isZen := resolveZenInfo(effectiveModel); isZen {
+				reqLog.Upstream = upstreamOpenCode // zen 反向故障转移后归因 opencode
+			}
 		}
 		if err != nil {
 			log.Printf("  api error: %v", err)
@@ -567,14 +599,122 @@ func cleanMessages(messages []any) []any {
 	return cleaned
 }
 
+// sanitizeMessages 修复出站消息历史中的畸形 tool_calls。
+// 背景：上游偶发输出 function.name 为空的 tool call（GLM 流式分片丢失 / 工具调用
+// 以文本形式泄漏），客户端执行后会把残缺记录回放进下一轮历史，导致上游恒定 400：
+// "tool_calls[N].function.name must be a non-empty string"。
+// 处理：
+//  1. 丢弃 function.name 为空的 tool_call；
+//  2. 过滤后 tool_calls 为空则移除该字段；
+//  3. 丢弃没有对应合法 assistant tool_call 的孤儿 tool 结果（自愈被污染的会话）。
+func sanitizeMessages(messages []any) []any {
+	validToolIDs := make(map[string]bool)
+	for _, m := range messages {
+		msg, ok := m.(map[string]any)
+		if !ok || msg["role"] != "assistant" {
+			continue
+		}
+		tcs, ok := msg["tool_calls"].([]any)
+		if !ok {
+			continue
+		}
+		for _, tc := range tcs {
+			tcMap, ok := tc.(map[string]any)
+			if !ok {
+				continue
+			}
+			fn, _ := tcMap["function"].(map[string]any)
+			name, _ := fn["name"].(string)
+			id, _ := tcMap["id"].(string)
+			if name != "" && id != "" {
+				validToolIDs[id] = true
+			}
+		}
+	}
+
+	cleaned := make([]any, 0, len(messages))
+	for _, m := range messages {
+		msg, ok := m.(map[string]any)
+		if !ok {
+			cleaned = append(cleaned, m)
+			continue
+		}
+		role, _ := msg["role"].(string)
+
+		// 孤儿 tool 结果：找不到对应的 assistant tool_call
+		if role == "tool" {
+			id, _ := msg["tool_call_id"].(string)
+			if !validToolIDs[id] {
+				continue
+			}
+			cleaned = append(cleaned, msg)
+			continue
+		}
+
+		// assistant 消息：剔除空名 tool_call
+		if role == "assistant" {
+			if tcs, ok := msg["tool_calls"].([]any); ok {
+				kept := make([]any, 0, len(tcs))
+				for _, tc := range tcs {
+					tcMap, ok := tc.(map[string]any)
+					if !ok {
+						continue
+					}
+					fn, _ := tcMap["function"].(map[string]any)
+					name, _ := fn["name"].(string)
+					if name == "" {
+						continue
+					}
+					kept = append(kept, tcMap)
+				}
+				if len(kept) == 0 {
+					delete(msg, "tool_calls")
+				} else {
+					msg["tool_calls"] = kept
+				}
+			}
+		}
+		cleaned = append(cleaned, msg)
+	}
+	return cleaned
+}
+
+// genToolUseID 生成 tool_use 块 id（上游未返回 id 时的兜底）。
+func genToolUseID() string {
+	return fmt.Sprintf("toolu_%x", time.Now().UnixNano())
+}
+
+// hasToolUseBlocks 判断 Anthropic content 块数组中是否含有有效的 tool_use 块。
+func hasToolUseBlocks(content any) bool {
+	blocks, ok := content.([]any)
+	if !ok {
+		return false
+	}
+	for _, b := range blocks {
+		if bm, ok := b.(map[string]any); ok && bm["type"] == "tool_use" {
+			return true
+		}
+	}
+	return false
+}
+
 func buildUpstreamBody(params map[string]any, stream bool) map[string]any {
 	sessionID := fmt.Sprintf("sess_%d", time.Now().UnixMilli())
 
 	maxTokens := defaultMaxTokens
+	source := ""
 	if mt, ok := params["max_tokens"].(float64); ok {
-		maxTokens = int(mt)
+		maxTokens, source = int(mt), "max_tokens"
 	} else if mt, ok := params["max_completion_tokens"].(float64); ok {
-		maxTokens = int(mt)
+		maxTokens, source = int(mt), "max_completion_tokens"
+	}
+	// 客户端发的 0 视为未设置、1~15 低于上游硬下限：一律兜到默认值，
+	// 否则 muse-spark 等模型直接 400 且错误会被回退链吞掉
+	if maxTokens < minUpstreamMaxTokens {
+		if source != "" {
+			log.Printf("  clamp %s=%d -> %d (upstream requires >= %d)", source, maxTokens, defaultMaxTokens, minUpstreamMaxTokens)
+		}
+		maxTokens = defaultMaxTokens
 	}
 
 	model := getDefaultModel()
@@ -591,7 +731,7 @@ func buildUpstreamBody(params map[string]any, stream bool) map[string]any {
 
 	if msgsRaw, ok := params["messages"]; ok {
 		if msgsArr, ok := msgsRaw.([]any); ok {
-			body["messages"] = cleanMessages(msgsArr)
+			body["messages"] = sanitizeMessages(msgsArr)
 		} else {
 			body["messages"] = msgsRaw
 		}
@@ -608,6 +748,11 @@ func buildUpstreamBody(params map[string]any, stream bool) map[string]any {
 	}
 	if model == freeModelMuse && body["reasoning_effort"] == "max" {
 		body["reasoning_effort"] = defaultReasoningEffort
+	}
+
+	// Cline 上游不接受 "none" 枚举：客户端显式关闭推理时直接省略该字段
+	if re, _ := body["reasoning_effort"].(string); re == "none" {
+		delete(body, "reasoning_effort")
 	}
 
 	for _, key := range passThroughKeys {
@@ -687,7 +832,14 @@ func callClineAPI(params map[string]any, stream bool) (*http.Response, *Account,
 	model, _ := params["model"].(string)
 	switch model {
 	case "free":
-		return callFreeClineAPI(params, stream)
+		resp, acc, err := callFreeClineAPI(params, stream)
+		if err != nil {
+			// Cline 殘血池整條鏈耗盡時，才退到 zen 免費模型。
+			if fbResp, attempted := clineFailoverToZen(params, stream); attempted {
+				return fbResp, nil, nil
+			}
+		}
+		return resp, acc, err
 	case "free-ds":
 		return callFreeClineAPIForModel(params, stream, freeModelFallback)
 	case freeModelV41Alias:
@@ -702,23 +854,234 @@ func callClineAPI(params map[string]any, stream bool) (*http.Response, *Account,
 		return callFreeClineAPIForModel(params, stream, freeModelCanary)
 	}
 
-	acc := pickAccountForModel(model)
-	if acc == nil {
-		return nil, nil, fmt.Errorf("no active accounts available. Use --login or admin API to add accounts")
+	// zen 免費模型只有在 zen 故障轉移時進入 Cline 池；裸 model id 必須改走 free 鏈。
+	if zm, ok := resolveZenInfo(model); ok && isZenFreeModel(zm) {
+		log.Printf("  zen failover: rewriting zen model %q to cline free chain", model)
+		return callFreeClineAPI(params, stream)
 	}
-	return callClineAPIWithAccount(acc, params, stream)
+
+	// 显式模型请求降级序列：
+	//  1. 自定义 provider（若该模型接入了 provider）
+	//  2. 客户端点名模型走 Cline 池
+	//  3. modelChain（管理员配置或内置 free 链）逐个降级
+	//  4. 全部失败 → 明确报错
+	// 可用性感知重排：点名模型保持首位，其余按「未冷却优先、用量少优先」
+	// 重排，避免回退流量每次都集中砸在第一个可用模型上直到它也冷却。
+	sorted := sortModelsByAvailability(modelFallbackChain(model))
+	chain := make([]string, 0, len(sorted)+1)
+	chain = append(chain, model)
+	for _, m := range sorted {
+		if m != model {
+			chain = append(chain, m)
+		}
+	}
+	for _, m := range chain {
+		// 先试自定义 provider
+		if pResp, pErr, attempted := callCustomProviderAPI(withModel(params, m), stream); attempted {
+			if pErr == nil {
+				if m != model {
+					log.Printf("  model fallback: %q unavailable, serving via provider %q", model, m)
+				}
+				params["model"] = m // 回写实际服务模型，供请求日志归因
+				return pResp, nil, nil
+			}
+			log.Printf("  provider attempt failed for %q: %v", m, pErr)
+		}
+
+		// 点名模型保持原有轮询语义；链上的降级模型改用「最久未用优先」，
+		// 避免所有降级流量都压到第一个可用账号/模型的额度上。
+		pickAcc := pickAccountForModelStrict
+		if m != model {
+			pickAcc = pickAccountForModelLeastUsed
+		}
+		for {
+			acc := pickAcc(m)
+			if acc == nil {
+				break // 该模型所有账号均冷却/不可用 → 尝试链上下一个模型
+			}
+			resp, usedAcc, err := callClineAPIWithAccount(acc, withModel(params, m), stream)
+			if err == nil {
+				if m != model {
+					log.Printf("  model fallback: %q cooling on all accounts, serving via %q", model, m)
+				}
+				params["model"] = m // 回写实际服务模型，供请求日志归因
+				return resp, usedAcc, nil
+			}
+			var accountErr *clineAccountUnavailableError
+			if errors.As(err, &accountErr) {
+				continue
+			}
+			apiErr, ok := err.(*clineAPIError)
+			if !ok || apiErr.statusCode != http.StatusTooManyRequests {
+				// 非 429 错误：若后面还有候选（provider / 链）则继续降级，否则透传
+				if !hasAnyFallbackLeft(model, m) {
+					return nil, usedAcc, err
+				}
+				break
+			}
+			// 429：模型冷却已记录，换下一个账号；全部冷却后降级到下一个模型
+		}
+	}
+	// 终极兜底：free 链（手动链全部失败时自动切换）
+	if model != "free" && !isFreeAliasModel(model) {
+		fp := withModel(params, "free")
+		if resp, acc, err := callFreeClineAPI(fp, stream); err == nil {
+			log.Printf("  auto fallback: all configured options failed for %q, served by free chain", model)
+			if fm, ok := fp["model"].(string); ok && fm != "" {
+				params["model"] = fm // callFreeClineAPI 就地改写 fp，取回实际服务模型
+			}
+			return resp, acc, nil
+		}
+	}
+	// Cline 侧（含 free 链）全部耗尽 → 反向故障转移到 zen 免费模型
+	if fbResp, attempted := clineFailoverToZen(params, stream); attempted {
+		return fbResp, nil, nil
+	}
+	if hasActiveAccounts() {
+		return nil, nil, &freeModelUnavailableError{message: fmt.Sprintf("model %q is cooling on all accounts and no fallback model is available", model)}
+	}
+	return nil, nil, fmt.Errorf("no active accounts available. Use --login or admin API to add accounts")
+}
+
+// withModel 返回带指定模型名的参数副本（避免污染调用方 map）。
+func withModel(params map[string]any, model string) map[string]any {
+	cp := make(map[string]any, len(params)+1)
+	for k, v := range params {
+		cp[k] = v
+	}
+	cp["model"] = model
+	return cp
+}
+
+// isFreeAliasModel 判断是否为 "free" 别名或链内免费模型（避免重复兜底）。
+func isFreeAliasModel(model string) bool {
+	if model == "free" {
+		return true
+	}
+	for _, m := range defaultFreeChain() {
+		if m == model {
+			return true
+		}
+	}
+	return false
+}
+
+// defaultFreeChain 动态派生默认回退链（管理员未配置 modelChain 时）：
+// 优先取 Cline 远程同步的免费模型（有效、不下架），再补内置常量链。
+// 已下架的内置模型（如 longcat-2.0，不在远程同步列表）自动排除，不再写死；
+// 从未同步成功（离线）时回退内置常量链。
+func defaultFreeChain() []string {
+	remote := remoteModelsActive()
+	p := loadPool()
+	known := make(map[string]bool, len(p.Models))
+	var remoteFree []string
+	for _, m := range p.Models {
+		known[m.ID] = true
+		if remote && m.Source == "remote" && m.Cost == "free" && m.Status == "active" {
+			remoteFree = append(remoteFree, m.ID)
+		}
+	}
+	chain := make([]string, 0, len(remoteFree)+len(freeModelChain))
+	seen := make(map[string]bool, len(remoteFree)+len(freeModelChain))
+	for _, m := range remoteFree {
+		if !seen[m] {
+			seen[m] = true
+			chain = append(chain, m)
+		}
+	}
+	for _, m := range freeModelChain {
+		if seen[m] || (remote && !known[m]) {
+			continue
+		}
+		seen[m] = true
+		chain = append(chain, m)
+	}
+	if len(chain) == 0 {
+		return freeModelChain
+	}
+	return chain
+}
+
+// hasAnyFallbackLeft 判断点名模型之后是否还有候选（决定 500 是否透传）。
+func hasAnyFallbackLeft(requested, current string) bool {
+	chain := modelFallbackChain(requested)
+	for i, m := range chain {
+		if m == current {
+			return i < len(chain)-1
+		}
+	}
+	return false
+}
+
+// modelFallbackChain 显式模型的降级序列：点名模型优先，其后是管理员配置的
+// 回退链（modelChain）；未配置时动态派生默认链（排除已下架模型）。均去重。
+func modelFallbackChain(requested string) []string {
+	configured := getProxyConfig().ModelChain
+	if len(configured) == 0 {
+		configured = defaultFreeChain()
+	}
+	chain := make([]string, 0, 1+len(configured))
+	chain = append(chain, requested)
+	for _, m := range configured {
+		if m != requested {
+			chain = append(chain, m)
+		}
+	}
+	return chain
+}
+
+// hasActiveAccounts 池中是否存在 active 状态的账号。
+func hasActiveAccounts() bool {
+	p := loadPool()
+	poolMu.Lock()
+	defer poolMu.Unlock()
+	for _, a := range p.Accounts {
+		if a.Status == "active" {
+			return true
+		}
+	}
+	return false
 }
 
 func callFreeClineAPI(params map[string]any, stream bool) (*http.Response, *Account, error) {
-	for _, model := range freeModelChain {
-		resp, usedAcc, err := callFreeClineAPIForModel(params, stream, model)
-		if err == nil {
-			return resp, usedAcc, nil
+	configured := getProxyConfig().ModelChain
+	chain := configured
+	if len(configured) == 0 {
+		chain = defaultFreeChain()
+	}
+	chain = sortModelsByAvailability(chain)
+	var lastErr error
+	lastWas429 := false
+	for _, model := range chain {
+		params["model"] = model
+		for {
+			acc := pickAccountForModelLeastUsed(model)
+			if acc == nil {
+				break
+			}
+
+			resp, usedAcc, err := callClineAPIWithAccount(acc, params, stream)
+			if err == nil {
+				return resp, usedAcc, nil
+			}
+			var accountErr *clineAccountUnavailableError
+			if errors.As(err, &accountErr) {
+				continue
+			}
+			lastErr = err
+			lastWas429 = false
+			if apiErr, ok := err.(*clineAPIError); ok && apiErr.statusCode == http.StatusTooManyRequests {
+				lastWas429 = true
+				continue
+			}
+			break
 		}
-		if _, unavailable := err.(*freeModelUnavailableError); unavailable {
-			continue
+	}
+	if lastErr != nil {
+		if lastWas429 {
+			return nil, nil, &freeModelUnavailableError{message: "no eligible accounts available for free models"}
 		}
-		return nil, usedAcc, err
+		return nil, nil, lastErr
 	}
 	return nil, nil, &freeModelUnavailableError{message: "no eligible accounts available for free models"}
 }
@@ -1377,6 +1740,7 @@ type anthropicReq struct {
 	TopP        float64         `json:"top_p,omitempty"`
 	TopK        int             `json:"top_k,omitempty"`
 	Stop        json.RawMessage `json:"stop_sequences,omitempty"`
+	Thinking    json.RawMessage `json:"thinking,omitempty"`
 	Tools       json.RawMessage `json:"tools,omitempty"`
 	ToolChoice  json.RawMessage `json:"tool_choice,omitempty"`
 	Metadata    json.RawMessage `json:"metadata,omitempty"`
@@ -1460,6 +1824,22 @@ func anthropicToOpenAI(req anthropicReq) map[string]any {
 	if req.TopP != 0 {
 		openAI["top_p"] = req.TopP
 	}
+	// Anthropic thinking 参数映射为 OpenAI reasoning_effort：
+	// disabled → "none"（buildUpstreamBody 会删除，不下发给 Cline 上游），
+	// enabled/adaptive → 默认 "high"。
+	if req.Thinking != nil {
+		var thinking struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(req.Thinking, &thinking); err == nil {
+			switch thinking.Type {
+			case "enabled", "adaptive":
+				openAI["reasoning_effort"] = defaultReasoningEffort
+			case "disabled":
+				openAI["reasoning_effort"] = "none"
+			}
+		}
+	}
 	// Convert Anthropic tools to OpenAI format
 	if req.Tools != nil {
 		var toolsArr []any
@@ -1490,7 +1870,7 @@ func anthropicToOpenAI(req anthropicReq) map[string]any {
 		case []any:
 			textParts := []string{}
 			var toolCalls []any
-			var toolResult *map[string]any
+			var toolResults []any
 
 			for _, block := range c {
 				if b, ok := block.(map[string]any); ok {
@@ -1502,6 +1882,10 @@ func anthropicToOpenAI(req anthropicReq) map[string]any {
 					case "image":
 						// skip images
 					case "tool_use":
+						// 跳过上游输出的空名 tool_use（畸形 tool call），避免污染历史导致后续 400
+						if name, _ := b["name"].(string); name == "" {
+							continue
+						}
 						argsStr := "{}"
 						if input, ok := b["input"]; ok && input != nil {
 							if s, ok := input.(string); ok {
@@ -1510,8 +1894,12 @@ func anthropicToOpenAI(req anthropicReq) map[string]any {
 								argsStr = string(bts)
 							}
 						}
+						id, _ := b["id"].(string)
+						if id == "" {
+							id = genToolUseID()
+						}
 						tc := map[string]any{
-							"id":   b["id"],
+							"id":   id,
 							"type": "function",
 							"function": map[string]any{
 								"name":      b["name"],
@@ -1520,12 +1908,18 @@ func anthropicToOpenAI(req anthropicReq) map[string]any {
 						}
 						toolCalls = append(toolCalls, tc)
 					case "tool_result":
+						trContent := b["content"]
+						if _, isStr := trContent.(string); !isStr && trContent != nil {
+							if bts, err := json.Marshal(trContent); err == nil {
+								trContent = string(bts)
+							}
+						}
 						tr := map[string]any{
 							"role":         "tool",
-							"content":      b["content"],
+							"content":      trContent,
 							"tool_call_id": b["tool_use_id"],
 						}
-						toolResult = &tr
+						toolResults = append(toolResults, tr)
 					}
 				}
 			}
@@ -1537,8 +1931,13 @@ func anthropicToOpenAI(req anthropicReq) map[string]any {
 					"tool_calls": toolCalls,
 				}
 				msgs = append(msgs, msg)
-			} else if m.Role == "user" && toolResult != nil {
-				msgs = append(msgs, *toolResult)
+			} else if m.Role == "user" && len(toolResults) > 0 {
+				for _, tr := range toolResults {
+					msgs = append(msgs, tr)
+				}
+				if len(textParts) > 0 {
+					msgs = append(msgs, map[string]any{"role": "user", "content": strings.Join(textParts, "\n")})
+				}
 			} else {
 				content := strings.Join(textParts, "\n")
 				msgs = append(msgs, map[string]any{"role": m.Role, "content": content})
@@ -1579,18 +1978,39 @@ func openAIToAnthropic(openAI map[string]any) map[string]any {
 		}
 	}
 
-	contentBlocks := []any{map[string]any{"type": "text", "text": text}}
+	// 上游 reasoning_content → Anthropic thinking 块（顺序：thinking 在 text 前）
+	var thinkingBlock map[string]any
+	if msg != nil {
+		if rc, ok := msg["reasoning_content"].(string); ok && rc != "" {
+			thinkingBlock = map[string]any{"type": "thinking", "thinking": rc, "signature": ""}
+		}
+	}
+
+	var contentBlocks []any
+	if thinkingBlock != nil {
+		contentBlocks = append(contentBlocks, thinkingBlock)
+	}
+	if text != "" || thinkingBlock == nil {
+		contentBlocks = append(contentBlocks, map[string]any{"type": "text", "text": text})
+	}
 
 	// Convert tool_calls to Anthropic tool_use blocks
 	if msg != nil {
 		if tc, ok := msg["tool_calls"].([]any); ok && len(tc) > 0 {
 			contentBlocks = []any{} // Clear text-only, proper response has both
+			if thinkingBlock != nil {
+				contentBlocks = append(contentBlocks, thinkingBlock)
+			}
 			if text != "" {
 				contentBlocks = append(contentBlocks, map[string]any{"type": "text", "text": text})
 			}
 			for _, tcItem := range tc {
 				if tcMap, ok := tcItem.(map[string]any); ok {
 					funcData, _ := tcMap["function"].(map[string]any)
+					// 跳过空名 tool_call（畸形工具调用），避免客户端收到无法执行的空 tool_use 块
+					if name, _ := funcData["name"].(string); name == "" {
+						continue
+					}
 					input := funcData["arguments"]
 					// OpenAI arguments is a JSON string; Anthropic expects an object
 					if argsStr, ok := input.(string); ok {
@@ -1599,9 +2019,13 @@ func openAIToAnthropic(openAI map[string]any) map[string]any {
 							input = argsObj
 						}
 					}
+					id, _ := tcMap["id"].(string)
+					if id == "" {
+						id = genToolUseID()
+					}
 					block := map[string]any{
 						"type":  "tool_use",
-						"id":    tcMap["id"],
+						"id":    id,
 						"name":  funcData["name"],
 						"input": input,
 					}
@@ -1634,6 +2058,52 @@ func openAIToAnthropic(openAI map[string]any) map[string]any {
 	out["usage"] = usage
 
 	return out
+}
+
+// zenFailoverToCline zen 调用失败后的透明降级：改走 cline 账号池 free 模型链。
+// attempted=false 表示未启用故障转移，调用方维持原错误路径。
+// 注意：失败计数由 callZenAPI 内部标记（每请求恰好一次），此处不再重复计数，
+// 否则限流/服务错误路径 + 此处各计一次，故障转移会被过早触发。
+func zenFailoverToCline(params map[string]any, stream bool) (*http.Response, *Account, error, bool) {
+	cfg := getZenConfig()
+	if !cfg.Failover {
+		return nil, nil, nil, false
+	}
+	orig, _ := params["model"].(string)
+	log.Printf("  zen failover: %q unavailable upstream, falling back to cline free pool", orig)
+	params["model"] = "free"
+	resp, acc, err := callFreeClineAPI(params, stream)
+	return resp, acc, err, true
+}
+
+// clineFailoverToZen Cline 侧（含 free 池链）全部耗尽后的反向故障转移：
+// 落到 opencode zen 免费模型。与 zenFailoverToCline 方向相反，形成双向闭环——
+// 任一免费上游挂掉，流量自动落到另一条。zen 未启用或处于故障转移窗口
+// （连续失败被判定不可达）时不尝试；最多试 3 个免费模型，避免在坏模型上反复烧时间。
+func clineFailoverToZen(params map[string]any, stream bool) (*http.Response, bool) {
+	cfg := getZenConfig()
+	if !cfg.Enabled || zenFailedNow() {
+		return nil, false
+	}
+	orig, _ := params["model"].(string)
+	attempts := 0
+	for _, m := range currentZenModels() {
+		if !isZenFreeModel(m) || m.ID == orig {
+			continue
+		}
+		attempts++
+		if attempts > 3 {
+			break
+		}
+		log.Printf("  cline failover: %q exhausted, trying zen free model %q", orig, m.ID)
+		params["model"] = m.ID
+		resp, err := callZenAPI(params, stream)
+		if err == nil {
+			return resp, true
+		}
+		log.Printf("  cline failover: zen model %q failed: %v", m.ID, err)
+	}
+	return nil, false
 }
 
 func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
@@ -1688,6 +2158,43 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 		}
 		resp, err := callZenAPI(openAIReq, req.Stream)
 		if err != nil {
+			if fbResp, fbAcc, fbErr, attempted := zenFailoverToCline(openAIReq, req.Stream); attempted {
+				if fbErr == nil {
+					log.Printf("  anthropic failover: serving %q via cline pool", req.Model)
+					reqLog.Upstream = upstreamCline
+					if fm, ok := openAIReq["model"].(string); ok && fm != "" {
+						reqLog.Model = fm // zen 故障转移后记录实际服务模型
+					}
+					if fbAcc != nil {
+						reqLog.AccountID = fbAcc.AccountID
+						reqLog.AccountEmail = fbAcc.Email
+					}
+					defer fbResp.Body.Close()
+					if req.Stream {
+						handleAnthropicStream(w, fbResp, fbAcc, &reqLog)
+					} else {
+						var raw map[string]any
+						if err := json.NewDecoder(fbResp.Body).Decode(&raw); err != nil {
+							finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, "decode response: "+err.Error())
+							writeJSON(w, http.StatusInternalServerError, map[string]any{
+								"error": map[string]string{"message": err.Error(), "type": "parse_error"},
+							})
+							return
+						}
+						out2 := normalizeOpenAIResponse(unwrapDataEnvelope(raw))
+						usage := parseTokenUsage(out2["usage"])
+						recordTokenUsage(fbAcc, reqLog.Model, usage)
+						finalizeRequestLog(&reqLog, usage, time.Time{}, reqLog.StartedAt, true, "")
+						anthropicResp := openAIToAnthropic(out2)
+						if hasToolUseBlocks(anthropicResp["content"]) {
+							anthropicResp["stop_reason"] = "tool_use"
+						}
+						writeJSON(w, http.StatusOK, anthropicResp)
+					}
+					return
+				}
+				err = fbErr
+			}
 			log.Printf("  anthropic api error: %v", err)
 			finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, err.Error())
 			writeJSON(w, http.StatusBadGateway, map[string]any{
@@ -1711,8 +2218,7 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 			usage := parseTokenUsage(out2["usage"])
 			finalizeRequestLog(&reqLog, usage, time.Time{}, reqLog.StartedAt, true, "")
 			anthropicResp := openAIToAnthropic(out2)
-			if tc, ok := getNested(out2, "choices", 0, "message", "tool_calls").([]any); ok && len(tc) > 0 {
-				anthropicResp["content"] = []any{}
+			if hasToolUseBlocks(anthropicResp["content"]) {
 				anthropicResp["stop_reason"] = "tool_use"
 			}
 			writeJSON(w, http.StatusOK, anthropicResp)
@@ -1740,7 +2246,10 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 
 	resp, acc, err := callClineAPI(openAIReq, req.Stream)
 	if effectiveModel, ok := openAIReq["model"].(string); ok && effectiveModel != "" {
-		reqLog.Model = effectiveModel
+		reqLog.Model = effectiveModel // 含回退后的实际服务模型
+		if _, isZen := resolveZenInfo(effectiveModel); isZen {
+			reqLog.Upstream = upstreamOpenCode // zen 反向故障转移后归因 opencode
+		}
 	}
 	if err != nil {
 		log.Printf("  anthropic api error: %v", err)
@@ -1780,8 +2289,7 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 		finalizeRequestLog(&reqLog, usage, time.Time{}, reqLog.StartedAt, true, "")
 		anthropicResp := openAIToAnthropic(out)
 
-		if tc, ok := getNested(out, "choices", 0, "message", "tool_calls").([]any); ok && len(tc) > 0 {
-			anthropicResp["content"] = []any{}
+		if hasToolUseBlocks(anthropicResp["content"]) {
 			anthropicResp["stop_reason"] = "tool_use"
 		}
 
@@ -1825,28 +2333,38 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 	textIndex := new(int)
 	*textIndex = -1
 	hasText := false
+	sawNamedTool := false
+	thinkingIdx := -1
+	thinkingOpen := false
 	pendingTools := map[int]*toolAccumulator{}
 
-	emitToolBlock := func(acc *toolAccumulator) {
+	emitToolBlock := func(acc *toolAccumulator, index int) {
 		acc.emitted = true
-		var argsObj any
-		json.Unmarshal([]byte(acc.args), &argsObj)
-		if argsObj == nil {
-			argsObj = map[string]any{}
+		args := acc.args
+		if args == "" {
+			args = "{}"
 		}
 		emit("content_block_start", map[string]any{
 			"type":  "content_block_start",
-			"index": acc.index,
+			"index": index,
 			"content_block": map[string]any{
 				"type":  "tool_use",
 				"id":    acc.id,
 				"name":  acc.name,
-				"input": argsObj,
+				"input": map[string]any{},
+			},
+		})
+		emit("content_block_delta", map[string]any{
+			"type":  "content_block_delta",
+			"index": index,
+			"delta": map[string]any{
+				"type":         "input_json_delta",
+				"partial_json": args,
 			},
 		})
 		emit("content_block_stop", map[string]any{
 			"type":  "content_block_stop",
-			"index": acc.index,
+			"index": index,
 		})
 	}
 
@@ -1906,10 +2424,44 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 			delta = choice
 		}
 
+		// Reasoning content delta → Anthropic thinking block（thinking 在 text 前）
+		if rc, ok := delta["reasoning_content"].(string); ok && rc != "" {
+			if !thinkingOpen {
+				*textIndex++
+				thinkingIdx = *textIndex
+				thinkingOpen = true
+				emit("content_block_start", map[string]any{
+					"type":  "content_block_start",
+					"index": thinkingIdx,
+					"content_block": map[string]any{
+						"type":      "thinking",
+						"thinking":  "",
+						"signature": "",
+					},
+				})
+			}
+			emit("content_block_delta", map[string]any{
+				"type":  "content_block_delta",
+				"index": thinkingIdx,
+				"delta": map[string]any{
+					"type":     "thinking_delta",
+					"thinking": rc,
+				},
+			})
+		}
+
 		// Text content delta
 		if c, ok := delta["content"].(string); ok && c != "" {
 			if !hasText {
 				hasText = true
+				// thinking 块随 text 块开启而结束
+				if thinkingOpen {
+					emit("content_block_stop", map[string]any{
+						"type":  "content_block_stop",
+						"index": thinkingIdx,
+					})
+					thinkingOpen = false
+				}
 				*textIndex++
 				emit("content_block_start", map[string]any{
 					"type":  "content_block_start",
@@ -1952,13 +2504,11 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 				if fn, ok := tcMap["function"].(map[string]any); ok {
 					if name, ok := fn["name"].(string); ok && name != "" {
 						acc.name = name
+						sawNamedTool = true
 					}
 					if args, ok := fn["arguments"].(string); ok && args != "" {
 						acc.args += args
 					}
-				}
-				if acc.id != "" && acc.name != "" && acc.args != "" && !acc.emitted {
-					emitToolBlock(acc)
 				}
 			}
 		}
@@ -1969,7 +2519,9 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 			case "length":
 				stopReason = "max_tokens"
 			case "tool_calls":
-				stopReason = "tool_use"
+				if sawNamedTool {
+					stopReason = "tool_use"
+				}
 			}
 		}
 	}
@@ -1977,6 +2529,15 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 	if streamErr != "" {
 		finalizeRequestLog(reqLog, latestUsage, firstOutputAt, reqLog.StartedAt, false, "upstream SSE error: "+streamErr)
 		return
+	}
+
+	// 上游沒有 text 輸出時，也要關閉仍開著的 thinking block。
+	if thinkingOpen {
+		emit("content_block_stop", map[string]any{
+			"type":  "content_block_stop",
+			"index": thinkingIdx,
+		})
+		thinkingOpen = false
 	}
 
 	// Stop text block if active
@@ -1987,10 +2548,26 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 		})
 	}
 
-	// Emit any remaining un-emitted tool blocks
-	for _, acc := range pendingTools {
+	// Emit tool blocks in deterministic order with proper indices,
+	// streaming args via input_json_delta (required by Anthropic clients).
+	nextIndex := *textIndex + 1
+	toolKeys := make([]int, 0, len(pendingTools))
+	for k := range pendingTools {
+		toolKeys = append(toolKeys, k)
+	}
+	sort.Ints(toolKeys)
+	for _, k := range toolKeys {
+		acc := pendingTools[k]
+		// 跳过没有名字的畸形 tool call（流式分片丢失 name 分片）
+		if acc.name == "" {
+			continue
+		}
+		if acc.id == "" {
+			acc.id = genToolUseID()
+		}
 		if !acc.emitted {
-			emitToolBlock(acc)
+			emitToolBlock(acc, nextIndex)
+			nextIndex++
 		}
 	}
 

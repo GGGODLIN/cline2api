@@ -98,8 +98,12 @@ var apiMessages = map[string]map[locale]string{
 		localeEN: "tokens array is empty",
 	},
 	"imported_accounts": {
-		localeZH: "已导入 %d 个账号，失败 %d 个",
-		localeEN: "Imported %d accounts, %d failed",
+		localeZH: "已导入 %d 个账号，失败 %d 个，跳过重复 %d 个",
+		localeEN: "Imported %d accounts, %d failed, %d duplicates skipped",
+	},
+	"account_exists": {
+		localeZH: "账号 %s 已存在，跳过重复添加",
+		localeEN: "Account %s already exists, skipped duplicate",
 	},
 	"url_required": {
 		localeZH: "必须提供 url",
@@ -181,6 +185,11 @@ var apiMessages = map[string]map[locale]string{
 	"opencode_config_saved": {
 		localeZH: "opencode 配置已保存",
 		localeEN: "OpenCode config saved",
+	},
+	// Cline 出口代理相关
+	"cline_proxy_saved": {
+		localeZH: "Cline 代理配置已保存",
+		localeEN: "Cline proxy config saved",
 	},
 	"invalid_base_url": {
 		localeZH: "无效的 Base URL，必须以 http:// 或 https:// 开头",

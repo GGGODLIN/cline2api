@@ -206,14 +206,18 @@ func chatToResponses(chat map[string]any) map[string]any {
 							continue
 						}
 						fn, _ := cm["function"].(map[string]any)
-						callID, _ := cm["id"].(string)
-						if callID == "" {
-							callID = newResponseID("fc_")
-						}
-						name, args := "", ""
+						// 跳过空名 tool_call（畸形工具调用），客户端无法执行
+						var name, args string
 						if fn != nil {
 							name, _ = fn["name"].(string)
 							args, _ = fn["arguments"].(string)
+						}
+						if name == "" {
+							continue
+						}
+						callID, _ := cm["id"].(string)
+						if callID == "" {
+							callID = newResponseID("fc_")
 						}
 						outputs = append(outputs, map[string]any{
 							"type":      "function_call",
@@ -478,6 +482,10 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 	reqLog := RequestLog{StartedAt: time.Now(), Protocol: "responses", Model: model, Stream: isStream}
 
 	chat := responsesToChat(params)
+	// 清洗畸形 tool_calls（空 function.name / 孤儿 tool 结果），避免上游 400
+	if msgs, ok := chat["messages"].([]any); ok {
+		chat["messages"] = sanitizeMessages(msgs)
+	}
 	chatModel, _ := chat["model"].(string)
 	route := routeModel(chatModel)
 
@@ -500,6 +508,42 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 		}
 		upResp, err := callZenAPI(chat, isStream)
 		if err != nil {
+			if fbResp, fbAcc, fbErr, attempted := zenFailoverToCline(chat, isStream); attempted {
+				if fbErr == nil {
+					log.Printf("  responses failover: serving %q via cline pool", chatModel)
+					reqLog.Upstream = upstreamCline
+					if fm, ok := chat["model"].(string); ok && fm != "" {
+						reqLog.Model = fm // zen 故障转移后记录实际服务模型
+					}
+					if fbAcc != nil {
+						reqLog.AccountID = fbAcc.AccountID
+						reqLog.AccountEmail = fbAcc.Email
+					}
+					defer fbResp.Body.Close()
+					if isStream {
+						w.Header().Set("Content-Type", "text/event-stream")
+						w.Header().Set("Cache-Control", "no-cache")
+						w.Header().Set("Connection", "keep-alive")
+						w.Header().Set("Access-Control-Allow-Origin", "*")
+						w.WriteHeader(http.StatusOK)
+						chatStreamToResponses(w, fbResp, &reqLog, fbAcc)
+						return
+					}
+					var raw map[string]any
+					if err := json.NewDecoder(fbResp.Body).Decode(&raw); err != nil {
+						finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, "decode response: "+err.Error())
+						writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+						return
+					}
+					out2 := normalizeOpenAIResponse(unwrapDataEnvelope(raw))
+					usage := parseTokenUsage(out2["usage"])
+					recordTokenUsage(fbAcc, reqLog.Model, usage)
+					finalizeRequestLog(&reqLog, usage, time.Time{}, reqLog.StartedAt, true, "")
+					writeJSON(w, http.StatusOK, chatToResponses(out2))
+					return
+				}
+				err = fbErr
+			}
 			log.Printf("  responses api error: %v", err)
 			finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, err.Error())
 			writeJSON(w, http.StatusBadGateway, map[string]any{
@@ -533,7 +577,10 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 		reqLog.Upstream = upstreamCline
 		upResp, acc, err := callClineAPI(chat, isStream)
 		if effectiveModel, ok := chat["model"].(string); ok && effectiveModel != "" {
-			reqLog.Model = effectiveModel
+			reqLog.Model = effectiveModel // 含回退后的实际服务模型
+			if _, isZen := resolveZenInfo(effectiveModel); isZen {
+				reqLog.Upstream = upstreamOpenCode // zen 反向故障转移后归因 opencode
+			}
 		}
 		if err != nil {
 			log.Printf("  responses api error: %v", err)

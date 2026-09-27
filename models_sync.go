@@ -61,7 +61,8 @@ var (
 
 // fetchClineRecommendedModels 拉取并解析 Cline 官方推荐模型接口。
 func fetchClineRecommendedModels() (clineRecommendedResponse, error) {
-	client := &http.Client{Timeout: modelSyncTimeout}
+	// 复用全局 transport：模型同步与 Cline 对话同源（api.cline.bot），共用出口代理
+	client := &http.Client{Timeout: modelSyncTimeout, Transport: httpTransport}
 	resp, err := client.Get(clineRecommendedModelsURL)
 	if err != nil {
 		return clineRecommendedResponse{}, fmt.Errorf("fetch models: %w", err)

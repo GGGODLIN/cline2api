@@ -42,7 +42,11 @@ body{font-family:-apple-system,BlinkMacSystemFont,'SF Pro Display','SF Pro Text'
 .nav-item.active{color:var(--accent);background:var(--accent-soft)}
 .nav-item svg{width:20px;height:20px;flex-shrink:0}
 .nav-item .nav-label{flex:1}
+.nav-item.dragging{opacity:0.5}
+.nav-item.drop-target{box-shadow:inset 0 2px 0 var(--accent)}
 .sidebar-footer{margin-top:auto;padding:16px 20px;border-top:1px solid var(--border2);font-size:12px;color:var(--text2)}
+.sidebar-lang{padding:0 20px 16px;border-top:1px solid var(--border2)}
+.sidebar-lang .lang-switch{margin-top:12px}
 .sidebar-footer a{color:var(--accent);text-decoration:none}
 .sidebar-footer a:hover{text-decoration:underline}
 .lang-switch{display:flex;gap:4px;margin-top:10px}
@@ -95,18 +99,22 @@ body{font-family:-apple-system,BlinkMacSystemFont,'SF Pro Display','SF Pro Text'
 
 /* ===== Table ===== */
 table{width:100%;border-collapse:collapse;table-layout:fixed}
+.model-subtable{table-layout:auto}
+.model-subtable td{padding:7px 12px;text-align:left;white-space:nowrap}
+.model-subtable td:nth-child(n+3){text-align:right;font-variant-numeric:tabular-nums}
 th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--border2);font-size:13px;vertical-align:middle}
 .section-body.flush{overflow-x:auto}
 th{color:var(--text2);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:0.4px;white-space:nowrap}
 tbody tr:last-child td{border-bottom:none}
 tbody tr{transition:background 0.15s var(--ease)}
 tbody tr:hover{background:var(--surface2)}
-.account-table th:first-child,.account-table td:first-child{width:16%}
-.account-table th:nth-child(2),.account-table td:nth-child(2){width:8%}
-.account-table th:nth-child(3),.account-table td:nth-child(3){width:5%}
+.account-table th:first-child,.account-table td:first-child{width:17%}
+.account-table td:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.account-table th:nth-child(2),.account-table td:nth-child(2){width:9%}
+.account-table th:nth-child(3),.account-table td:nth-child(3){width:6%;text-align:right;font-variant-numeric:tabular-nums}
 .account-table th:nth-child(4),.account-table td:nth-child(4),.account-table th:nth-child(5),.account-table td:nth-child(5),.account-table th:nth-child(6),.account-table td:nth-child(6),.account-table th:nth-child(7),.account-table td:nth-child(7){width:7%;text-align:right;font-variant-numeric:tabular-nums}
-.account-table th:nth-child(8),.account-table td:nth-child(8),.account-table th:nth-child(9),.account-table td:nth-child(9){width:11%;white-space:nowrap;color:var(--text2)}
-.account-table th:last-child,.account-table td:last-child{width:120px;min-width:120px;text-align:right;white-space:nowrap}
+.account-table th:nth-child(8),.account-table td:nth-child(8),.account-table th:nth-child(9),.account-table td:nth-child(9){width:11%;white-space:nowrap;color:var(--text2);overflow:hidden;text-overflow:ellipsis}
+.account-table th:last-child,.account-table td:last-child{width:172px;min-width:172px;text-align:right;white-space:nowrap}
 .account-table td:last-child .btn{width:32px;padding-left:0;padding-right:0;justify-content:center}
 .account-email{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);font-weight:500}
 .account-cards{display:none}
@@ -206,6 +214,10 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
 .model-group-count{font-size:11px;color:var(--text3);font-weight:400;background:var(--surface2);border:1px solid var(--border2);border-radius:8px;padding:0 7px;line-height:16px}
 .model-group-body{margin:2px 0 4px 18px}
 .warn-box{display:flex;align-items:flex-start;gap:8px;margin-top:10px;padding:10px 12px;border-radius:8px;background:var(--yellow-soft);color:var(--yellow);font-size:13px;line-height:1.5;border:1px solid var(--yellow)}
+.subtabs{display:flex;gap:2px;border:1px solid var(--border2);border-radius:10px;background:var(--surface2);padding:3px;margin-bottom:18px;width:max-content;max-width:100%;overflow-x:auto}
+.subtab{padding:7px 16px;border-radius:8px;cursor:pointer;color:var(--text2);font-size:13px;font-weight:500;white-space:nowrap}
+.subtab:hover{color:var(--text)}
+.subtab.active{background:var(--surface);color:var(--accent);box-shadow:var(--shadow-sm)}
 
 /* action row */
 .action-row{display:flex;gap:8px;flex-wrap:wrap}
@@ -216,6 +228,8 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
   .sidebar{width:100%;height:auto;min-height:0;position:static;border-right:none;border-bottom:1px solid var(--border2)}
   .sidebar-header{padding:14px 16px;border-bottom:none}
   .sidebar-header .brand-sub,.nav-section-label,.sidebar-footer{display:none}
+  .sidebar-lang{padding:0 12px 10px;border-top:none}
+  .sidebar-lang .lang-switch{margin-top:10px}
   .nav-section{display:flex;padding:0 10px 12px;gap:4px;overflow-x:auto}
   .nav-item{flex:1;justify-content:center;gap:6px;margin:0;padding:8px 10px;min-width:max-content}
   .nav-item svg{width:18px;height:18px}
@@ -255,8 +269,8 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
 	  .account-table{display:none}
 	  .account-cards{display:grid;gap:10px;padding:12px}
 	  .account-card{border:1px solid var(--border2);border-radius:12px;padding:14px;background:var(--surface2)}
-	  .account-card-header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}
-	  .account-card .account-email{max-width:calc(100vw - 170px)}
+  .account-card-header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}
+  .account-card .account-email{max-width:calc(100vw - 170px);min-width:0}
 	  .account-metrics{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-bottom:12px}
 	  .account-metric{padding:8px 10px;border-radius:8px;background:var(--surface)}
 	  .account-metric-label{display:block;color:var(--text2);font-size:11px;margin-bottom:2px}
@@ -285,11 +299,14 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
     </div>
   </div>
   <div class="nav-section">
-    <div class="nav-section-label">管理</div>
+    <div class="nav-section-label">概览</div>
     <div class="nav-item active" data-tab="dashboard">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
       <span class="nav-label">仪表盘</span>
     </div>
+  </div>
+  <div class="nav-section">
+    <div class="nav-section-label">账号</div>
     <div class="nav-item" data-tab="accounts">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
       <span class="nav-label">账号管理</span>
@@ -302,9 +319,23 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="16" y2="17"/></svg>
       <span class="nav-label">请求日志</span>
     </div>
-    <div class="nav-item" data-tab="settings">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-      <span class="nav-label">设置</span>
+  </div>
+  <div class="nav-section">
+    <div class="nav-section-label">配置</div>
+    <div class="nav-item" data-tab="routing">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3"/><circle cx="18" cy="18" r="3"/><path d="M6 9v3a3 3 0 0 0 3 3h6"/></svg>
+      <span class="nav-label">路由与模型</span>
+    </div>
+    <div class="nav-item" data-tab="upstreams">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>
+      <span class="nav-label">上游服务</span>
+    </div>
+  </div>
+  <div class="nav-section">
+    <div class="nav-section-label">系统</div>
+    <div class="nav-item" data-tab="security">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+      <span class="nav-label">密钥与安全</span>
     </div>
     <div class="nav-item" data-tab="about">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
@@ -318,6 +349,8 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
     </div>
     <div style="margin-bottom:4px">API: <span id="footerApiAddr">127.0.0.1:3457</span></div>
     <div><a href="#" onclick="openExternal('https://github.com/luawei1/cline2api');return false">GitHub</a> · <a href="#" onclick="openExternal('https://github.com/luawei1/cline2api/issues');return false">反馈</a> · MIT</div>
+  </div>
+  <div class="sidebar-lang">
     <div class="lang-switch">
       <button type="button" id="langZh" onclick="setLang('zh')">中文</button>
       <button type="button" id="langEn" onclick="setLang('en')">English</button>
@@ -401,7 +434,7 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
       <button class="btn" onclick="refreshAllTokens()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>刷新全部 Token</button>
       <button class="btn" onclick="document.getElementById('fileInput').click()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>从文件导入</button>
       <input type="file" id="fileInput" accept=".json,.txt" style="display:none" onchange="handleFileImport(event)">
-      <button class="btn" onclick="switchTab('settings');generateKey()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>生成 API 密钥</button>
+      <button class="btn" onclick="switchTab('security');generateKey()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>生成 API 密钥</button>
     </div>
   </div>
 </div>
@@ -528,9 +561,13 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
   </div>
 </div>
 
-<div id="tab-settings" class="tab-panel" style="display:none">
-  <div class="large-title">设置</div>
-  <div class="large-subtitle">管理 API 密钥、模型、代理配置与请求头</div>
+<div id="tab-security" class="tab-panel" style="display:none">
+  <div class="page-header">
+    <div>
+      <div class="large-title">密钥与安全</div>
+      <div class="large-subtitle">API 密钥、访问控制与危险操作</div>
+    </div>
+  </div>
 
   <div class="section">
     <div class="section-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>API 密钥管理</div>
@@ -541,33 +578,6 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
       </div>
       <div id="keysList"></div>
       <div id="keyGenResult" style="margin-top:8px"></div>
-    </div>
-  </div>
-
-  <div class="section">
-    <div class="section-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="9" x2="15" y2="9"/><line x1="9" y1="15" x2="15" y2="15"/></svg><span>可用模型</span>
-      <span style="margin-left:auto;display:flex;align-items:center;gap:10px;font-size:12px;font-weight:400;color:var(--text3)">
-        <span><span>上次同步</span>: <span id="modelSyncTime">从未同步</span></span>
-        <button class="sync-btn" id="syncModelsBtn" onclick="syncModels()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg><span>从 Cline 同步模型</span></button>
-        <button class="sync-btn" id="syncOcModelsBtn" onclick="syncOcModels()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg><span>从 opencode 同步模型</span></button>
-      </span>
-    </div>
-    <div class="section-body">
-      <div id="modelsList" class="action-row">加载中...</div>
-      <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
-        <div class="field" style="flex:1;min-width:220px">
-          <label>添加模型</label>
-          <input type="text" id="newModelId" placeholder="如 deepseek/deepseek-v4-flash" style="font-family:ui-monospace,monospace">
-        </div>
-        <div class="field">
-          <label>计费</label>
-          <select id="newModelCost">
-            <option value="pass">付费 (pass)</option>
-            <option value="free">免费 (free)</option>
-          </select>
-        </div>
-        <button class="btn btn-success" onclick="addModel()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>添加</button>
-      </div>
     </div>
   </div>
 
@@ -605,6 +615,25 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
   </div>
 
   <div class="section">
+    <div class="section-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>危险操作</div>
+    <div class="section-body">
+      <div class="action-row">
+        <button class="btn btn-danger" onclick="deleteAllAccounts()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>删除全部账号</button>
+        <button class="btn btn-danger" onclick="deleteAllKeys()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>删除全部密钥</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="tab-routing" class="tab-panel" style="display:none">
+  <div class="page-header">
+    <div>
+      <div class="large-title">路由与模型</div>
+      <div class="large-subtitle">默认模型、轮询策略、回退链与可用模型</div>
+    </div>
+  </div>
+
+  <div class="section">
     <div class="section-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>代理配置</div>
     <div class="section-body">
       <div class="form-row">
@@ -622,11 +651,65 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
         <div class="field"><label>引擎版本</label><input type="text" id="settingVersion" disabled></div>
       </div>
       <div class="form-row">
+        <div class="field">
+          <label>只显示免费模型</label>
+          <select id="settingOnlyFree" onchange="updateConfig()">
+            <option value="false">关闭（返回全部模型）</option>
+            <option value="true">开启（/models 仅返回免费模型）</option>
+          </select>
+          <div style="font-size:12px;color:var(--text3);margin-top:4px">影响 /models、/v1/models 对客户端返回的模型列表，不影响管理页模型管理</div>
+        </div>
+        <div class="field"><label>回退模型链</label><input type="text" id="settingModelChain" placeholder="z-ai/glm-5.3-flash, deepseek/deepseek-v4-flash, cline-free/longcat-2.0" oninput="this.dataset.dirty='1'" onchange="updateConfig()"></div>
+      </div>
+      <div class="form-row">
         <div class="field"><label>账号文件</label><input type="text" id="settingPoolPath" disabled></div>
       </div>
     </div>
   </div>
 
+  <div class="section">
+    <div class="section-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="9" x2="15" y2="9"/><line x1="9" y1="15" x2="15" y2="15"/></svg><span>可用模型</span>
+      <span style="margin-left:auto;display:flex;align-items:center;gap:10px;font-size:12px;font-weight:400;color:var(--text3)">
+        <span><span>上次同步</span>: <span id="modelSyncTime">从未同步</span></span>
+        <button class="sync-btn" id="syncModelsBtn" onclick="syncModels()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg><span>从 Cline 同步模型</span></button>
+        <button class="sync-btn" id="syncOcModelsBtn" onclick="syncOcModels()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg><span>从 opencode 同步模型</span></button>
+      </span>
+    </div>
+    <div class="section-body">
+      <div id="modelsList" class="action-row">加载中...</div>
+      <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+        <div class="field" style="flex:1;min-width:220px">
+          <label>添加模型</label>
+          <input type="text" id="newModelId" placeholder="如 deepseek/deepseek-v4-flash" style="font-family:ui-monospace,monospace">
+        </div>
+        <div class="field">
+          <label>计费</label>
+          <select id="newModelCost">
+            <option value="pass">付费 (pass)</option>
+            <option value="free">免费 (free)</option>
+          </select>
+        </div>
+        <button class="btn btn-success" onclick="addModel()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>添加</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="tab-upstreams" class="tab-panel" style="display:none">
+  <div class="page-header">
+    <div>
+      <div class="large-title">上游服务</div>
+      <div class="large-subtitle">opencode zen、Cline 出口代理、请求头与自定义 Provider</div>
+    </div>
+  </div>
+  <div class="subtabs" id="upstreamSubTabs">
+    <div class="subtab active" data-sub="zen">opencode Zen</div>
+    <div class="subtab" data-sub="cline">Cline 出口代理</div>
+    <div class="subtab" data-sub="headers">请求头</div>
+    <div class="subtab" data-sub="providers">自定义 Provider</div>
+  </div>
+
+  <div class="upstream-group" data-group="zen">
   <div class="section">
     <div class="section-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg><span>opencode 免费模型</span>
       <span style="margin-left:auto;display:flex;align-items:center;gap:10px;font-size:12px;font-weight:400;color:var(--text3)">
@@ -698,8 +781,38 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
     </div>
   </div>
 
+  </div>
+
+  <div class="upstream-group" data-group="cline" style="display:none">
   <div class="section">
-    <div class="section-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7V4h16v3"/><path d="M9 20h6"/><path d="M12 4v16"/></svg>请求头配置（模拟 Cline CLI 发出）</div>
+    <div class="section-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>Cline 出口代理</div>
+    <div class="section-desc">国内直连 Cline 上游会被跨区限制；配置后所有发往 Cline 的请求（对话、登录/令牌刷新、模型同步）经代理池轮询出去。支持 http / https / socks5 / socks5h，每行一个，如 <span class="mono">socks5://127.0.0.1:1080</span>。回环 / 内网地址（本机 Ollama 等自定义 Provider）始终直连；未配置时依次尝试环境变量代理、直连。</div>
+    <div class="section-body">
+      <div class="form-row">
+        <div class="field" style="max-width:260px">
+          <label>代理策略</label>
+          <select id="clineProxyStrategy">
+            <option value="round_robin">轮询 (round_robin)</option>
+            <option value="random">随机 (random)</option>
+            <option value="fill">填满 (fill)</option>
+          </select>
+        </div>
+      </div>
+      <div class="field" style="margin-top:10px">
+        <label>代理列表</label>
+        <textarea id="clineProxies" rows="4" style="width:100%;font-family:ui-monospace,monospace;font-size:12px;border:1px solid var(--border2);border-radius:8px;padding:8px;background:var(--surface);color:var(--text)" placeholder="socks5://127.0.0.1:1080&#10;http://user:pass@proxy.example.com:8080"></textarea>
+      </div>
+      <div class="form-actions" style="margin-top:14px">
+        <button class="btn btn-primary" onclick="saveClineProxyConfig()">保存 Cline 代理</button>
+      </div>
+      <div id="clineProxySaveResult" style="margin-top:8px"></div>
+    </div>
+  </div>
+  </div>
+
+  <div class="upstream-group" data-group="headers" style="display:none">
+  <div class="section">
+    <div class="section-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7V4h16v3"/><path d="M9 20h6"/><path d="M12 4v16"/></svg>Cline 请求头</div>
     <div class="section-desc">这些请求头会附加到所有转发给 Cline API 的请求中，以模拟官方客户端行为。</div>
     <div class="section-body">
       <table>
@@ -711,22 +824,76 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
       <div class="form-actions" style="margin-top:14px">
         <button class="btn btn-sm" onclick="addHeaderRow()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>添加请求头</button>
         <button class="btn btn-sm btn-primary" onclick="saveHeaders()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>保存请求头</button>
+        <button class="btn btn-sm" onclick="bulkEditHeaders()">批量编辑</button>
       </div>
       <div id="headerSaveResult" style="margin-top:8px"></div>
     </div>
   </div>
 
   <div class="section">
-    <div class="section-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>危险操作</div>
+    <div class="section-title">opencode 请求头</div>
+    <div class="section-desc">附加到发往 opencode zen 的请求。特殊值：$session / $request / $project / $client 会注入每请求的动态身份；留空删除该头。</div>
     <div class="section-body">
-      <div class="action-row">
-        <button class="btn btn-danger" onclick="deleteAllAccounts()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>删除全部账号</button>
-        <button class="btn btn-danger" onclick="deleteAllKeys()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>删除全部密钥</button>
+      <div class="field">
+        <label>请求头（每行一个，格式 Key: Value）</label>
+        <textarea id="zenHeadersBulk" rows="6" style="width:100%;font-family:ui-monospace,monospace;font-size:12px;border:1px solid var(--border2);border-radius:8px;padding:8px;background:var(--surface);color:var(--text)" placeholder="User-Agent: opencode/1.18.31&#10;x-opencode-project: global&#10;x-custom-header: my-value"></textarea>
       </div>
+      <div class="form-actions" style="margin-top:10px">
+        <button class="btn btn-sm btn-primary" onclick="saveZenHeaders()">保存 opencode 请求头</button>
+      </div>
+      <div id="zenHeaderSaveResult" style="margin-top:8px"></div>
     </div>
   </div>
-</div>
 
+  </div>
+
+  <div class="upstream-group" data-group="providers" style="display:none">
+  <div class="section">
+    <div class="section-title">自定义 Provider（OpenAI 兼容）</div>
+    <div class="section-desc">接入任意 OpenAI 兼容上游（OpenRouter / Groq / Cerebras / Gemini / Mistral / Together / 自建 vLLM 等）。模型命中自定义 Provider 时优先走该上游，失败自动按回退链降级，最终兜底 Cline 池。</div>
+    <div class="section-body">
+      <div id="providersList"></div>
+      <div class="form-actions" style="margin-top:10px">
+        <button class="btn btn-sm btn-primary" onclick="showProviderEditor()">＋ 添加 Provider</button>
+        <button class="btn btn-sm" onclick="loadProviderPresets()">从预设添加（免费源）</button>
+      </div>
+      <div id="providerEditor" style="display:none;margin-top:14px;border:1px solid var(--border2);border-radius:10px;padding:14px">
+        <div class="form-row">
+          <div class="field"><label>名称 *</label><input type="text" id="provName" placeholder="OpenRouter"></div>
+          <div class="field" style="flex:1.6"><label>Base URL *</label><input type="text" id="provBaseURL" placeholder="https://openrouter.ai/api/v1" style="font-family:ui-monospace,monospace"></div>
+        </div>
+        <div class="form-row">
+          <div class="field" style="flex:1.4"><label>API Key</label><input type="password" id="provKey" placeholder="sk-...（本地服务器可留空）"></div>
+          <div class="field"><label>优先级（小=优先）</label><input type="number" id="provPriority" value="10" min="0" max="1000"></div>
+          <div class="field"><label>超时(秒)</label><input type="number" id="provTimeout" value="300" min="5" max="600"></div>
+        </div>
+        <div class="form-row">
+          <div class="field" style="flex:1"><label>模型 ID（逗号分隔，如 z-ai/glm-5.3-flash, deepseek/deepseek-v4-flash）</label><input type="text" id="provModels" style="font-family:ui-monospace,monospace"></div>
+        </div>
+        <div class="form-row">
+          <div class="field" style="flex:1"><label>自定义请求头（每行 Key: Value，如 HTTP-Referer: https://mysite.com）</label><textarea id="provHeaders" rows="3" style="width:100%;font-family:ui-monospace,monospace;font-size:12px;border:1px solid var(--border2);border-radius:8px;padding:8px;background:var(--surface);color:var(--text)"></textarea></div>
+        </div>
+        <div class="form-row">
+          <div class="field">
+            <label>启用</label>
+            <select id="provEnabled"><option value="true">启用</option><option value="false">停用</option></select>
+          </div>
+          <div class="field">
+            <label>免费来源（供统计）</label>
+            <select id="provFree"><option value="true">免费</option><option value="false">付费</option></select>
+          </div>
+        </div>
+        <div class="form-actions" style="margin-top:10px">
+          <button class="btn btn-sm btn-primary" onclick="saveProvider()">保存 Provider</button>
+          <button class="btn btn-sm" onclick="hideProviderEditor()">取消</button>
+          <button class="btn btn-sm" onclick="testProvider()">测试连通性</button>
+          <span id="provTestResult" style="font-size:12px;margin-left:8px"></span>
+        </div>
+      </div>
+      <div id="providerPresets" style="display:none;margin-top:14px;border:1px solid var(--border2);border-radius:10px;padding:14px"></div>
+    </div>
+  </div>
+  </div>
 </div>
 
 <div id="tab-about" class="tab-panel" style="display:none">
@@ -764,7 +931,7 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
           <div style="width:28px;height:28px;border-radius:50%;background:var(--accent-soft);color:var(--accent);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:14px;flex-shrink:0">2</div>
           <div>
             <div style="font-weight:600;color:var(--text)">生成 API Key</div>
-            <div style="font-size:13px;color:var(--text2);margin-top:2px">前往「设置」页面生成密钥。如不配置任何密钥，代理允许匿名访问。</div>
+            <div style="font-size:13px;color:var(--text2);margin-top:2px">前往「密钥与安全」页面生成密钥。如不配置任何密钥，代理允许匿名访问。</div>
           </div>
         </div>
         <div style="display:flex;gap:12px;align-items:flex-start">
@@ -934,6 +1101,7 @@ const I18N = {
   '代理配置': 'Proxy Config',
   '默认模型': 'Default Model',
   '轮询策略': 'Rotation Strategy',
+  '回退模型链': 'Fallback Model Chain',
   '轮询 (round_robin)': 'Round robin',
   '填满 (fill)': 'Fill',
   '随机 (random)': 'Random',
@@ -955,7 +1123,7 @@ const I18N = {
   '添加 Cline 账号': 'Add a Cline account',
   '前往「导入账号」页面，通过 OAuth 登录或手动输入 refreshToken 添加账号。支持批量导入。': 'Go to Import and add via OAuth or a pasted refreshToken. Batch import supported.',
   '生成 API Key': 'Generate an API Key',
-  '前往「设置」页面生成密钥。如不配置任何密钥，代理允许匿名访问。': 'Generate a key in Settings. With no keys, the proxy allows anonymous access.',
+  '前往「密钥与安全」页面生成密钥。如不配置任何密钥，代理允许匿名访问。': 'Generate a key in Keys & Security. With no keys, the proxy allows anonymous access.',
   '配置客户端': 'Configure your client',
   '在 Claude Code、Cline 等客户端中设置：': 'Configure in clients like Claude Code or Cline:',
   '功能特性': 'Features',
@@ -1076,6 +1244,11 @@ const I18N = {
   '移除模型': 'Removed models',
   '模型无变化': 'No model changes',
   '模型列表已更新': 'Model list updated',
+  '上下文窗口 / 最大输出 (token)，点击⚙修改': 'Context window / max output (tokens), click ⚙ to edit',
+  '上下文窗口 (token)': 'Context window (tokens)',
+  '最大输出 (token)': 'Max output (tokens)',
+  '已保存': 'Saved',
+  '保存失败': 'Save failed',
   '同步中...': 'Syncing...',
   '暂无模型': 'No models',
   '模型统计': 'Model Usage',
@@ -1116,7 +1289,67 @@ const I18N = {
   'opencode 配置已保存': 'OpenCode config saved',
   'opencode 出口代理': 'OpenCode Egress Proxies',
   '发往 opencode 的请求可经代理池轮询出口；命中限流时冷却当前出口并自动跳过。支持 http / https / socks5 / socks5h，每行一个，如 ': 'Requests to opencode can egress through a rotating proxy pool; the current proxy is cooled down and skipped on rate limits. Supports http / https / socks5 / socks5h, one per line, e.g. ',
+  '发往 opencode 的请求可经代理池轮询出口；命中限流时冷却当前出口并自动跳过。支持 http / https / socks5 / socks5h，每行一个，如': 'Requests to opencode can egress through a rotating proxy pool; the current proxy is cooled down and skipped on rate limits. Supports http / https / socks5 / socks5h, one per line, e.g.',
+  'opencode 免费模型': 'opencode Free Models',
+  '＋ 添加 Provider': '＋ Add Provider',
+  '名称 *': 'Name *',
+  '免费': 'Free',
+  '付费': 'Paid',
+  '版本 ': 'Version ',
+  '版本 dev': 'Version dev',
+  'JSON 数组格式：[{"refreshToken":"...","email":"..."}]': 'JSON array format: [{"refreshToken":"...","email":"..."}]',
+  'API Key: <生成的密钥>': 'API Key: <generated key>',
   '代理策略': 'Proxy strategy',
+  '自定义 Provider（OpenAI 兼容）': 'Custom Providers (OpenAI-compatible)',
+  '批量编辑': 'Bulk Edit',
+  '批量编辑（每行 Key: Value）': 'Bulk edit (one Key: Value per line)',
+  '应用并保存': 'Apply & Save',
+  '名称': 'Name',
+  '取消': 'Cancel',
+  '保存 Provider': 'Save Provider',
+  '添加 Provider': 'Add Provider',
+  '本地服务器可留空）': 'leave empty on local server)',
+  '超时(秒)': 'Timeout (s)',
+  '优先级（小=优先）': 'Priority (lower = first)',
+  '免费来源（供统计）': 'Free source (for stats)',
+  '模型 ID（逗号分隔，如 z-ai/glm-5.3-flash, deepseek/deepseek-v4-flash）': 'Model IDs (comma-separated, e.g. z-ai/glm-5.3-flash, deepseek/deepseek-v4-flash)',
+  '自定义请求头（每行 Key: Value，如 HTTP-Referer: https://mysite.com）': 'Custom headers (one Key: Value per line, e.g. HTTP-Referer: https://mysite.com)',
+  '请求头（每行一个，格式 Key: Value）': 'Headers (one per line, format Key: Value)',
+  '保存 opencode 请求头': 'Save opencode Headers',
+  'opencode 请求头已保存': 'opencode headers saved',
+  '附加到发往 opencode zen 的请求。特殊值：': 'Attached to requests sent to opencode zen. Special values: ',
+  '附加到发往 opencode zen 的请求。特殊值：$session / $request / $project / $client 会注入每请求的动态身份；留空删除该头。': 'Attached to requests sent to opencode zen. Special values: $session / $request / $project / $client inject per-request dynamic identity; an empty value deletes the header.',
+  '接入任意 OpenAI 兼容上游（OpenRouter / Groq / Cerebras / Gemini / Mistral / Together / 自建 vLLM 等）。模型命中自定义 Provider 时优先走该上游，失败自动按回退链降级，最终兜底 Cline 池。': 'Connect any OpenAI-compatible upstream (OpenRouter / Groq / Cerebras / Gemini / Mistral / Together / self-hosted vLLM, etc.). Matching models route to the provider first; failures fall back along the chain and finally to the Cline pool.',
+  'opencode 请求头（模拟官方客户端）': 'opencode Headers (mimic official client)',
+  '粘贴 refreshToken': 'Paste refreshToken',
+  '如 deepseek/deepseek-v4-flash': 'e.g. deepseek/deepseek-v4-flash',
+  '留空保存 = 清除密码': 'leave empty to save = clear password',
+  '多账号轮询（轮询/填满/随机）': 'Multi-account rotation (round-robin/fill/random)',
+  'OpenAI & Anthropic 双协议': 'OpenAI & Anthropic dual protocol',
+  '429 冷却自动恢复': 'Automatic 429 cooldown recovery',
+  '账号导出/导入（跨设备迁移）': 'Account export/import (cross-device migration)',
+  'OAuth 系统浏览器登录': 'OAuth via system browser',
+  '请求日志与统计': 'Request logs & stats',
+  'System Prompt 覆盖': 'System Prompt override',
+  '跨平台桌面端（Win/Mac/Linux）': 'Cross-platform desktop (Win/Mac/Linux)',
+  '⚠️ 当前监听非本机回环地址（0.0.0.0 或局域网 IP），管理后台无鉴权，局域网内任何设备都可访问。请确认网络环境安全，或配合防火墙限制端口。': '⚠️ Listening on a non-loopback address (0.0.0.0 or LAN IP) exposes the admin panel without authentication to the whole network. Ensure the network is trusted or restrict the port via firewall.',
+  '概览': 'Overview',
+  '账号': 'Accounts',
+  '配置': 'Configuration',
+  '系统': 'System',
+  '路由与模型': 'Routing & Models',
+  '上游服务': 'Upstreams',
+  '密钥与安全': 'Keys & Security',
+  '默认模型、轮询策略、回退链与可用模型': 'Default model, rotation strategy, fallback chain & models',
+  'opencode zen、Cline 出口代理、请求头与自定义 Provider': 'opencode zen, Cline egress proxies, headers & custom providers',
+  'Cline 请求头': 'Cline Request Headers',
+  'opencode 请求头': 'OpenCode Request Headers',
+  '请求头': 'Headers',
+  '自定义 Provider': 'Providers',
+  'API 密钥、访问控制与危险操作': 'API keys, access control & danger zone',
+  '从预设添加（免费源）': 'Add from presets (free tiers)',
+  '测试连通性': 'Test connection',
+  '暂无自定义 Provider': 'No custom providers yet',
   '出口冷却状态': 'Egress cooldowns',
   '代理列表': 'Proxy list',
   '无冷却': 'None cooling',
@@ -1125,6 +1358,12 @@ const I18N = {
   '正常': 'Healthy',
   '已同步模型': 'Models synced',
   '接入 opencode（zen）免费模型。按请求中的模型名自动分流：免费模型走 opencode 上游，付费模型直接拒绝，其余走 Cline 账号池。': 'Integrates opencode (zen) free models. Requests are routed automatically by model name: free models go to the opencode upstream, paid models are rejected, everything else goes to the Cline account pool.',
+  // Cline 出口代理
+  'Cline 出口代理': 'Cline Egress Proxies',
+  '国内直连 Cline 上游会被跨区限制；配置后所有发往 Cline 的请求（对话、登录/令牌刷新、模型同步）经代理池轮询出去。支持 http / https / socks5 / socks5h，每行一个，如 ': 'Cline upstream is region-restricted from mainland China; once configured, all requests to Cline (chat, login/token refresh, model sync) egress through a rotating proxy pool. Supports http / https / socks5 / socks5h, one per line, e.g. ',
+  '。回环 / 内网地址（本机 Ollama 等自定义 Provider）始终直连；未配置时依次尝试环境变量代理、直连。': '. Loopback / private addresses (local Ollama and other custom providers) always connect directly; without config, env proxies then direct connection are tried.',
+  '保存 Cline 代理': 'Save Cline proxies',
+  'Cline 代理配置已保存': 'Cline proxy config saved',
   // 模型分组
   'opencode · 免费模型': 'opencode · Free Models',
   'opencode · 付费模型': 'opencode · Paid Models',
@@ -1229,7 +1468,9 @@ document.querySelectorAll('.nav-item').forEach(el => {
 loadStats(); loadAccounts(); }
     if (el.dataset.tab === 'accounts') loadAccounts();
     if (el.dataset.tab === 'logs') loadRequestLogs(true);
-    if (el.dataset.tab === 'settings') { loadKeys(); loadModels(); loadConfig(); loadOcConfig(); }
+    if (el.dataset.tab === 'routing') { loadModels().then(() => loadConfig()); }
+    if (el.dataset.tab === 'upstreams') { loadOcConfig(); loadClineProxyConfig(); loadZenHeaders(); loadProviders(); }
+    if (el.dataset.tab === 'security') { loadKeys(); loadConfig(); }
   });
 });
 
@@ -1242,8 +1483,70 @@ function switchTab(name) {
   if (name === 'dashboard') { loadStats(); loadAccounts(); }
   if (name === 'accounts') loadAccounts();
   if (name === 'logs') loadRequestLogs(true);
-  if (name === 'settings') { loadKeys(); loadModels(); loadOcConfig(); }
+  if (name === 'routing') { loadModels().then(() => loadConfig()); }
+  if (name === 'upstreams') { loadOcConfig(); loadClineProxyConfig(); loadZenHeaders(); loadProviders(); }
+  if (name === 'security') { loadKeys(); loadConfig(); }
 }
+
+// ========== 侧栏排序（拖拽） ==========
+const NAV_ORDER_KEY = 'cline_admin_nav_order';
+function applyNavOrder() {
+  let order = [];
+  try { order = JSON.parse(localStorage.getItem(NAV_ORDER_KEY) || '[]'); } catch(e) {}
+  if (!Array.isArray(order) || !order.length) return;
+  const nav = document.querySelector('.nav-section').parentElement;
+  const items = {};
+  nav.querySelectorAll('.nav-item').forEach(el => { items[el.dataset.tab] = el; });
+  // 重排：按保存的顺序把条目移回其分区末尾，未知 tab 忽略
+  order.forEach(tab => {
+    const el = items[tab];
+    if (!el) return;
+    const sec = el.closest('.nav-section');
+    sec.appendChild(el);
+  });
+}
+function saveNavOrder() {
+  const order = Array.from(document.querySelectorAll('.nav-item')).map(el => el.dataset.tab);
+  try { localStorage.setItem(NAV_ORDER_KEY, JSON.stringify(order)); } catch(e) {}
+}
+function initNavDrag() {
+  let dragged = null;
+  document.querySelectorAll('.nav-item').forEach(el => {
+    el.draggable = true;
+    el.addEventListener('dragstart', e => { dragged = el; el.classList.add('dragging'); try { e.dataTransfer.setData('text/plain', el.dataset.tab); } catch(err){} e.dataTransfer.effectAllowed = 'move'; });
+    el.addEventListener('dragend', () => { el.classList.remove('dragging'); document.querySelectorAll('.nav-item').forEach(x => x.classList.remove('drop-target')); dragged = null; });
+    el.addEventListener('dragover', e => {
+      e.preventDefault();
+      if (!dragged || dragged === el) return;
+      e.dataTransfer.dropEffect = 'move';
+      document.querySelectorAll('.nav-item').forEach(x => x.classList.remove('drop-target'));
+      el.classList.add('drop-target');
+    });
+    el.addEventListener('dragleave', () => el.classList.remove('drop-target'));
+    el.addEventListener('drop', e => {
+      e.preventDefault();
+      if (!dragged || dragged === el) return;
+      const sec = el.closest('.nav-section');
+      const rect = el.getBoundingClientRect();
+      const after = (e.clientY - rect.top) > rect.height / 2;
+      sec.insertBefore(dragged, after ? el.nextSibling : el);
+      dragged.classList.remove('dragging');
+      document.querySelectorAll('.nav-item').forEach(x => x.classList.remove('drop-target'));
+      saveNavOrder();
+    });
+  });
+}
+initNavDrag();
+applyNavOrder();
+
+// 上游服务子标签
+document.querySelectorAll('#upstreamSubTabs .subtab').forEach(el => {
+  el.addEventListener('click', () => {
+    document.querySelectorAll('#upstreamSubTabs .subtab').forEach(e => e.classList.remove('active'));
+    el.classList.add('active');
+    document.querySelectorAll('.upstream-group').forEach(g => g.style.display = (g.dataset.group === el.dataset.sub) ? '' : 'none');
+  });
+});
 
 // 导入子标签
 document.querySelectorAll('#importTabs .tab').forEach(el => {
@@ -1324,7 +1627,10 @@ async function loadStats() {
     _('statOcOutputTokens').textContent = formatTokenCount(oc.outputTokens || 0);
     _('statOcTotalTokens').textContent = formatTokenCount(oc.totalTokens || 0);
     if (s.version) _('settingVersion').value = s.version;
-    if (s.strategy) _('settingStrategy').value = s.strategy;
+    // 设置项由 /config 返回为准；这里仅在用户未编辑时回填，避免轮询清掉正在输入的内容
+    const fillIfIdle = (id, val) => { const el = _(id); if (el && document.activeElement !== el && !el.dataset.dirty) el.value = val; };
+    if (s.strategy) fillIfIdle('settingStrategy', s.strategy);
+    fillIfIdle('settingModelChain', (s.modelChain || []).join(', '));
   } catch (e) { /* ignore */ }
 }
 
@@ -1358,7 +1664,6 @@ async function loadAccounts() {
           '<td>' + formatTokenCount(st.completionTokens) + '</td>' +
           '<td>' + formatTokenCount(st.totalTokens) + '</td>' +
           '<td>' + formatTokenCount(st.cachedTokens) + '</td>' +
-          '<td></td><td></td><td></td>' +
           '</tr>';
       }).join('');
       const coolsWithoutStats = Object.keys(cools).filter(m => cools[m] && !(a.modelStats || {})[m]);
@@ -1366,16 +1671,16 @@ async function loadAccounts() {
         '<tr style="background:var(--surface2)">' +
           '<td style="padding-left:32px" class="mono">' + esc(m) + '</td>' +
           '<td><span class="status cooldown status-cooldown" title="' + t('模型冷却中') + ' · ' + formatCooldown(cools[m]) + '"><span class="cd-icon">⏳</span><span class="cd-time">' + formatCooldown(cools[m]) + '</span></span></td>' +
-          '<td colspan="8"></td>' +
+          '<td colspan="5"></td>' +
         '</tr>'
       ).join('');
       const totalCooling = Object.keys(cools).length;
       const title = '<tr style="background:var(--surface2)">' +
-        '<td colspan="10" style="padding:8px 32px;color:var(--text2);font-size:12px;font-weight:600">' +
+        '<td colspan="7" style="padding:8px 32px;color:var(--text2);font-size:12px;font-weight:600">' +
           t('按模型统计（仅免费模型）') + (totalCooling ? ' · <span style="color:var(--yellow)">⏳ ' + totalCooling + ' ' + t('模型冷却中') + '</span>' : '') +
         '</td></tr>';
       if (!rows && !extraCools) {
-        return title + '<tr style="background:var(--surface2)"><td colspan="10" style="padding:6px 32px;color:var(--text3);font-size:12px">' + t('暂无数据') + '</td></tr>';
+        return title + '<tr style="background:var(--surface2)"><td colspan="7" style="padding:6px 32px;color:var(--text3);font-size:12px">' + t('暂无数据') + '</td></tr>';
       }
       return title + rows + extraCools;
     };
@@ -1388,7 +1693,7 @@ async function loadAccounts() {
       // 始终显示模型统计展开按钮（无数据时子行提示暂无）
       const expander = '<button class="btn btn-sm btn-icon" onclick="toggleModelRow(\'' + a.accountId + '\', this)" title="' + t('展开') + '">▸</button>';
       return '<tr>' +
-        '<td>' + esc(a.email) + '</td>' +
+        '<td class="mono" style="font-size:12px" title="' + esc(a.email) + '">' + esc(a.email) + '</td>' +
         '<td>' + statusBadge + '</td>' +
         '<td>' + formatNumber(a.usageCount) + '</td>' +
         '<td>' + formatTokenCount(a.promptTokens) + '</td>' +
@@ -1610,24 +1915,35 @@ async function exportAccounts() {
 
 // ========== 批量导入 ==========
 // 解析导入数据：支持导出格式 {tokens:[...]}、JSON 数组 [...]、单行一个 token 的纯文本
+// 解析后按 refreshToken 去重，避免同一账号被重复导入
 function parseImportData(text) {
   let parsed;
   try {
     parsed = JSON.parse(text);
   } catch {
     // 纯文本：每行一个 refreshToken
-    return text.split('\n').filter(t => t.trim()).map(t => ({ refreshToken: t.trim() }));
+    parsed = text.split('\n').filter(t => t.trim()).map(t => ({ refreshToken: t.trim() }));
   }
+  let list;
   // 导出格式 {tokens:[...], exportedAt:...}
   if (parsed && !Array.isArray(parsed) && Array.isArray(parsed.tokens)) {
-    return parsed.tokens;
-  }
+    list = parsed.tokens;
   // JSON 数组
-  if (Array.isArray(parsed)) {
-    return parsed;
-  }
+  } else if (Array.isArray(parsed)) {
+    list = parsed;
   // 单个对象
-  return [parsed];
+  } else {
+    list = [parsed];
+  }
+  const seen = new Set();
+  return list
+    .map(item => (item && typeof item === 'object') ? item : { refreshToken: String(item || '').trim() })
+    .filter(item => {
+      const tok = (item.refreshToken || '').trim();
+      if (!tok || seen.has(tok)) return false;
+      seen.add(tok);
+      return true;
+    });
 }
 
 async function batchImport() {
@@ -1649,7 +1965,8 @@ async function handleFileImport(event) {
   const tokens = parseImportData(text);
   try {
     const d = await api('POST', '/batch-import', { tokens });
-    toast(d.message || t('导入了 ') + tokens.length + t(' 个账号'), 'success');
+    const imported = (d.data && typeof d.data.imported === 'number') ? d.data.imported : tokens.length;
+    toast(d.message || t('导入了 ') + imported + t(' 个账号'), 'success');
     loadAccounts(); loadStats();
   } catch (e) { toast(t('导入失败: ') + e.message, 'error'); }
   event.target.value = '';
@@ -1721,8 +2038,12 @@ function copyText(t) {
 async function updateConfig() {
   const strategy = _('settingStrategy').value;
   const defaultModel = _('settingDefModel').value;
+  const chainField = _('settingModelChain');
+  const modelChain = chainField.value.split(',').map(s => s.trim()).filter(Boolean);
+  const onlyFree = _('settingOnlyFree') ? _('settingOnlyFree').value === 'true' : undefined;
   try {
-    await api('POST', '/config/update', { strategy, defaultModel });
+    await api('POST', '/config/update', { strategy, defaultModel, modelChain, onlyFree });
+    delete chainField.dataset.dirty;
     toast(t('配置已更新'), 'success');
   } catch (e) { toast(t('更新失败: ') + e.message, 'error'); }
 }
@@ -1766,6 +2087,204 @@ function addHeaderRow() {
   tbody.appendChild(tr);
 }
 
+// 批量编辑：把表格转成 textarea，一行一个 Key: Value
+async function bulkEditHeaders() {
+  const tbody = _('headersTableBody');
+  const rows = tbody.querySelectorAll('tr');
+  const lines = [];
+  rows.forEach(tr => {
+    const k = tr.querySelector('.header-key'), v = tr.querySelector('.header-val');
+    if (k && k.value.trim()) lines.push(k.value.trim() + ': ' + (v ? v.value.trim() : ''));
+  });
+  const box = document.createElement('div');
+  box.innerHTML =
+    '<div class="field" style="margin-top:10px"><label>批量编辑（每行 Key: Value）</label>' +
+    '<textarea id="headersBulk" rows="10" style="width:100%;font-family:ui-monospace,monospace;font-size:12px;border:1px solid var(--border2);border-radius:8px;padding:8px;background:var(--surface);color:var(--text)">' + esc(lines.join('\n')) + '</textarea></div>' +
+    '<div class="form-actions" style="margin-top:8px"><button class="btn btn-sm btn-primary" onclick="applyBulkHeaders()">应用并保存</button>' +
+    '<button class="btn btn-sm" onclick="loadConfig()">取消</button></div>';
+  tbody.parentElement.parentElement.querySelector('.form-actions').style.display = 'none';
+  tbody.parentElement.parentElement.appendChild(box);
+}
+
+async function applyBulkHeaders() {
+  const text = _('headersBulk').value;
+  const headers = {};
+  text.split('\n').forEach(line => {
+    const idx = line.indexOf(':');
+    if (idx <= 0) return;
+    const k = line.slice(0, idx).trim();
+    const v = line.slice(idx + 1).trim();
+    if (k) headers[k] = v;
+  });
+  try {
+    await api('POST', '/config/update', { headers });
+    toast(t('请求头已保存') + ' (' + Object.keys(headers).length + ')', 'success');
+    loadConfig();
+  } catch (e) { toast(t('保存失败: ') + e.message, 'error'); }
+}
+
+// ========== opencode 请求头 ==========
+function parseHeaderText(text) {
+  const out = {};
+  text.split('\n').forEach(line => {
+    const idx = line.indexOf(':');
+    if (idx <= 0) return;
+    const k = line.slice(0, idx).trim();
+    const v = line.slice(idx + 1).trim();
+    if (k) out[k] = v;
+  });
+  return out;
+}
+
+async function loadZenHeaders() {
+  try {
+    const d = await api('GET', '/opencode/config');
+    const c = d.data || {};
+    const hdrs = c.zenHeaders || {};
+    _('zenHeadersBulk').value = Object.entries(hdrs).map(([k, v]) => k + ': ' + v).join('\n');
+  } catch (e) { /* ignore */ }
+}
+
+async function saveZenHeaders() {
+  try {
+    await api('POST', '/opencode/config/update', { zenHeaders: parseHeaderText(_('zenHeadersBulk').value) });
+    toast(t('opencode 请求头已保存'), 'success');
+    _('zenHeaderSaveResult').innerHTML = '<div style="color:var(--green);font-size:13px">✓ ' + t('已保存') + '</div>';
+    setTimeout(() => _('zenHeaderSaveResult').innerHTML = '', 4000);
+  } catch (e) { toast(t('保存失败: ') + e.message, 'error'); }
+}
+
+// ========== 自定义 Provider ==========
+let _editingProviderId = '';
+
+async function loadProviders() {
+  try {
+    const d = await api('GET', '/providers');
+    const list = d.data.providers || [];
+    const box = _('providersList');
+    if (!list.length) { box.innerHTML = '<div class="empty" style="padding:10px;color:var(--text3)">' + t('暂无自定义 Provider') + '</div>'; return; }
+    box.innerHTML = '<table><thead><tr><th>名称</th><th>Base URL</th><th>模型</th><th>优先级</th><th>状态</th><th style="width:150px"></th></tr></thead><tbody>' +
+      list.map(p =>
+        '<tr>' +
+          '<td>' + esc(p.name) + (p.free ? ' <span style="color:var(--green);font-size:11px">free</span>' : '') + '</td>' +
+          '<td class="mono" style="font-size:11px;max-width:220px;overflow:hidden;text-overflow:ellipsis">' + esc(p.baseURL) + '</td>' +
+          '<td style="font-size:11px;max-width:200px;overflow:hidden;text-overflow:ellipsis">' + esc((p.modelIds || []).join(', ')) + '</td>' +
+          '<td>' + p.priority + '</td>' +
+          '<td>' + (p.enabled ? '<span style="color:var(--green)">✓</span>' : '<span style="color:var(--text3)">停用</span>') + '</td>' +
+          '<td><button class="btn btn-sm" onclick="editProvider(\'' + p.id + '\')">编辑</button> ' +
+              '<button class="btn btn-sm" onclick=\'testProviderById("' + p.id + '")\'>测试</button> ' +
+              '<button class="btn btn-sm btn-danger" onclick=\'deleteProvider("' + p.id + '")\'>✕</button></td>' +
+        '</tr>'
+      ).join('') + '</tbody></table>';
+  } catch (e) { /* ignore */ }
+}
+
+function showProviderEditor(p) {
+  _editingProviderId = p ? p.id : '';
+  _('provName').value = p ? p.name : '';
+  _('provBaseURL').value = p ? p.baseURL : '';
+  _('provKey').value = p ? (p.apiKey || '') : '';
+  _('provPriority').value = p ? p.priority : 10;
+  _('provTimeout').value = p ? (p.timeoutSec || 300) : 300;
+  _('provModels').value = p ? (p.modelIds || []).join(', ') : '';
+  _('provHeaders').value = p ? Object.entries(p.headers || {}).map(([k, v]) => k + ': ' + v).join('\n') : '';
+  _('provEnabled').value = p ? String(p.enabled !== false) : 'true';
+  _('provFree').value = p ? String(!!p.free) : 'true';
+  _('providerEditor').style.display = '';
+}
+
+function hideProviderEditor() { _('providerEditor').style.display = 'none'; }
+
+async function saveProvider() {
+  const payload = {
+    id: _editingProviderId,
+    name: _('provName').value.trim(),
+    baseURL: _('provBaseURL').value.trim(),
+    apiKey: _('provKey').value.trim(),
+    priority: parseInt(_('provPriority').value, 10) || 10,
+    timeoutSec: parseInt(_('provTimeout').value, 10) || 300,
+    modelIds: _('provModels').value.split(',').map(s => s.trim()).filter(Boolean),
+    headers: parseHeaderText(_('provHeaders').value),
+    enabled: _('provEnabled').value === 'true',
+    free: _('provFree').value === 'true',
+  };
+  try {
+    await api('POST', '/providers/save', payload);
+    toast(t('Provider 已保存'), 'success');
+    hideProviderEditor();
+    loadProviders();
+  } catch (e) { toast(t('保存失败: ') + e.message, 'error'); }
+}
+
+function editProvider(id) {
+  api('GET', '/providers').then(d => {
+    const p = (d.data.providers || []).find(x => x.id === id);
+    if (p) showProviderEditor(p);
+  });
+}
+
+async function deleteProvider(id) {
+  if (!confirm(t('确定删除该 Provider？'))) return;
+  try {
+    await api('POST', '/providers/delete', { id });
+    toast(t('已删除'), 'success');
+    loadProviders();
+  } catch (e) { toast(t('删除失败: ') + e.message, 'error'); }
+}
+
+async function testProviderById(id) {
+  _('provTestResult').textContent = '...';
+  try {
+    const d = await api('POST', '/providers/test', { id });
+    const r = d.data;
+    _('provTestResult').innerHTML = r.ok
+      ? '<span style="color:var(--green)">✓ ' + r.durationMs + 'ms</span>'
+      : '<span style="color:var(--red)">✗ ' + esc(r.error || 'failed') + '</span>';
+  } catch (e) { _('provTestResult').innerHTML = '<span style="color:var(--red)">✗</span>'; }
+}
+
+async function testProvider() {
+  // 先保存再测试（测试走已保存配置）
+  await saveProvider();
+  setTimeout(async () => {
+    try {
+      const d = await api('GET', '/providers');
+      const list = d.data.providers || [];
+      const mine = list.filter(p => p.name === _('provName').value.trim());
+      if (mine.length) testProviderById(mine[0].id);
+    } catch (e) {}
+  }, 400);
+}
+
+async function loadProviderPresets() {
+  const box = _('providerPresets');
+  if (box.style.display !== 'none') { box.style.display = 'none'; return; }
+  try {
+    const d = await api('GET', '/providers/presets');
+    const presets = d.data.presets || [];
+    box.innerHTML = '<div style="font-weight:600;margin-bottom:8px">' + t('点击预设快速填充') + ':</div>' +
+      '<div style="display:flex;flex-wrap:wrap;gap:8px">' + presets.map(p =>
+        '<button class="btn btn-sm" title="' + esc(p.notes) + '" onclick=\'applyPreset("' + p.key + '")\'>' +
+        esc(p.name) + (p.freeTier ? ' 🆓' : '') + '</button>'
+      ).join('') + '</div>' +
+      '<div style="font-size:11px;color:var(--text3);margin-top:8px">🆓 = 提供免费额度（需自行注册 API Key）</div>';
+    box.style.display = '';
+    box.dataset.presets = JSON.stringify(presets);
+  } catch (e) {}
+}
+
+function applyPreset(key) {
+  const presets = JSON.parse(_('providerPresets').dataset.presets || '[]');
+  const p = presets.find(x => x.key === key);
+  if (!p) return;
+  showProviderEditor(null);
+  _('provName').value = p.name;
+  _('provBaseURL').value = p.baseURL;
+  _('provHeaders').value = Object.entries(p.headers || {}).map(([k, v]) => k + ': ' + v).join('\n');
+  _('providerPresets').style.display = 'none';
+  toast(t('已填充预设，请补 API Key 和模型 ID'), 'info');
+}
+
 async function saveHeaders() {
   const tbody = _('headersTableBody');
   const rows = tbody.querySelectorAll('tr');
@@ -1801,10 +2320,35 @@ function isOcModel(m) { return m.source === 'zen' || m.provider === 'opencode'; 
 
 function renderModelChip(m) {
   let item = '<span class="model-tag ' + (m.cost || 'free') + '">' + esc(m.id) + '</span>';
+  if (m.context) {
+    item += '<span style="font-size:11px;color:var(--text3);margin-left:4px" title="' + t('上下文窗口 / 最大输出 (token)，点击⚙修改') + '">ctx ' + fmtTokens(m.context) + '</span>';
+  }
+  if (isOcModel(m) || m.custom) {
+    item += '<button class="btn btn-sm" style="padding:2px 6px" onclick="editModelMeta(\'' + esc(m.id) + '\',' + (m.context || 0) + ',' + (m.output || 0) + ')" title="' + t('上下文窗口 / 最大输出 (token)，点击⚙修改') + '">⚙</button>';
+  }
   if (m.custom) {
     item += '<button class="btn btn-sm btn-danger" style="padding:2px 6px" onclick="deleteModel(\'' + esc(m.id) + '\')" title="' + t('删除') + '">✕</button>';
   }
   return '<span class="model-item">' + item + '</span>';
+}
+
+function fmtTokens(n) {
+  if (n >= 1000000) return (n / 1000000).toFixed(n % 1000000 ? 1 : 0) + 'M';
+  if (n >= 1000) return Math.round(n / 1000) + 'K';
+  return String(n);
+}
+
+// 修改模型上下文/最大输出：压缩阈值按此计算，设置后 zen 同步保留该值
+async function editModelMeta(id, ctx, out) {
+  const c = prompt(t('上下文窗口 (token)') + ' - ' + id, ctx || 200000);
+  if (c === null) return;
+  const o = prompt(t('最大输出 (token)'), out || 32768);
+  if (o === null) return;
+  try {
+    await api('POST', '/models/context', { id: id, context: parseInt(c, 10) || 0, output: parseInt(o, 10) || 0 });
+    toast(t('已保存') + ': ' + id + ' ctx=' + fmtTokens(parseInt(c, 10) || 0), 'success');
+    await loadModels();
+  } catch (e) { toast(t('保存失败') + ': ' + e.message, 'error'); }
 }
 
 // 模型分组渲染：opencode / Cline 分类，付费模型默认折叠，点击组头展开
@@ -1971,6 +2515,30 @@ async function saveOcConfig() {
   }
 }
 
+async function loadClineProxyConfig() {
+  try {
+    const d = await api('GET', '/cline-proxy/config');
+    const c = d.data;
+    _('clineProxyStrategy').value = c.proxyStrategy || 'round_robin';
+    _('clineProxies').value = (c.proxies || []).join('\n');
+  } catch (e) { /* ignore */ }
+}
+
+async function saveClineProxyConfig() {
+  const payload = {
+    proxyStrategy: _('clineProxyStrategy').value,
+    proxies: _('clineProxies').value.split('\n').map(s => s.trim()).filter(Boolean),
+  };
+  try {
+    await api('POST', '/cline-proxy/config/update', payload);
+    _('clineProxySaveResult').innerHTML = '<span style="color:var(--green)">✓ ' + t('Cline 代理配置已保存') + '</span>';
+    setTimeout(() => _('clineProxySaveResult').innerHTML = '', 5000);
+    await loadClineProxyConfig();
+  } catch (e) {
+    toast(t('保存失败: ') + (e.message || ''), 'error');
+  }
+}
+
 function showModelSyncModal(res) {
   const ov = _('modelSyncOverlay');
   if (!ov) return;
@@ -2023,8 +2591,10 @@ async function loadConfig() {
     const c = d.data;
     if (c.address) _('settingAddr').value = c.address;
     if (c.strategy) _('settingStrategy').value = c.strategy;
-    if (c.version) _('settingVersion').value = c.version;
+    _('settingModelChain').value = (c.modelChain || []).join(', ');
+    if (c.onlyFree !== undefined && _('settingOnlyFree')) _('settingOnlyFree').value = String(c.onlyFree);
     if (c.version) {
+      if (_('settingVersion')) _('settingVersion').value = c.version;
       if (_('footerVersion')) _('footerVersion').textContent = c.version;
       if (_('aboutVersion')) _('aboutVersion').textContent = t('版本 ') + c.version;
     }

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -333,7 +334,7 @@ func TestBuildZenBodyRewritesModelAndStripsReasoning(t *testing.T) {
 		"stream":     true,
 		"tools":      []any{},
 	}
-	body := buildZenBody(params, true)
+	body := buildZenBody(params, true, false)
 	if body["model"] != "deepseek-v4-flash-free" {
 		t.Errorf("model alias rewrite failed: %v", body["model"])
 	}
@@ -354,9 +355,9 @@ func TestBuildZenBodyRewritesModelAndStripsReasoning(t *testing.T) {
 
 func TestResponsesToChatStringInput(t *testing.T) {
 	out := responsesToChat(map[string]any{
-		"model":            "m1",
-		"input":            "hello",
-		"instructions":     "be brief",
+		"model":             "m1",
+		"input":             "hello",
+		"instructions":      "be brief",
 		"max_output_tokens": 500.0,
 	})
 	msgs := out["messages"].([]any)
@@ -462,5 +463,197 @@ func TestUsageToResponses(t *testing.T) {
 	}
 	if u["input_tokens_details"].(map[string]any)["cached_tokens"] != int64(2) {
 		t.Errorf("cached detail: %v", u)
+	}
+}
+
+// ============ 匿名免费层 agent 形态伪装测试 ============
+
+func TestBuildZenBodyAnonymousInjectsToolsAndStream(t *testing.T) {
+	params := map[string]any{
+		"model":    "mimo-v2.6-flash-free",
+		"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+	}
+	body := buildZenBody(params, false, true)
+	if body["stream"] != true {
+		t.Error("anonymous body must force stream=true upstream")
+	}
+	so, ok := body["stream_options"].(map[string]any)
+	if !ok || so["include_usage"] != true {
+		t.Error("anonymous body must set stream_options.include_usage")
+	}
+	tools, ok := body["tools"].([]any)
+	if !ok {
+		t.Fatal("anonymous body must inject tools")
+	}
+	names := map[string]bool{}
+	for _, item := range tools {
+		entry, _ := item.(map[string]any)
+		fn, _ := entry["function"].(map[string]any)
+		name, _ := fn["name"].(string)
+		names[name] = true
+	}
+	for _, want := range anonymousCoreTools {
+		if !names[want] {
+			t.Errorf("missing core tool %q", want)
+		}
+	}
+
+	// 客户端已声明的工具保持原样，缺的才补
+	params2 := map[string]any{
+		"model":    "mimo-v2.6-flash-free",
+		"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+		"tools":    []any{map[string]any{"type": "function", "function": map[string]any{"name": "bash", "parameters": map[string]any{}}}},
+	}
+	body2 := buildZenBody(params2, false, true)
+	tools2, _ := body2["tools"].([]any)
+	if len(tools2) != len(anonymousCoreTools) {
+		t.Fatalf("want %d tools (1 declared + %d injected), got %d", len(anonymousCoreTools), len(anonymousCoreTools)-1, len(tools2))
+	}
+}
+
+func TestCanonicalZenSessionFormat(t *testing.T) {
+	pattern := `^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$`
+	re := regexp.MustCompile(pattern)
+	// 无信号 → 随机规范形态
+	s1 := zenSessionID(map[string]any{})
+	if !re.MatchString(s1) {
+		t.Errorf("random session %q does not match canonical format", s1)
+	}
+	// 同一对话 → 稳定派生
+	params := map[string]any{
+		"messages": []any{map[string]any{"role": "user", "content": "hello world"}},
+	}
+	s2 := zenSessionID(params)
+	s3 := zenSessionID(params)
+	if s2 != s3 {
+		t.Errorf("same conversation must derive stable session: %q vs %q", s2, s3)
+	}
+	if !re.MatchString(s2) {
+		t.Errorf("derived session %q does not match canonical format", s2)
+	}
+	// 不同对话 → 不同会话
+	params4 := map[string]any{
+		"messages": []any{map[string]any{"role": "user", "content": "different"}},
+	}
+	if zenSessionID(params4) == s2 {
+		t.Error("different conversations must derive different sessions")
+	}
+}
+
+// ============ Anthropic thinking 映射测试 ============
+
+func TestAnthropicThinkingMapping(t *testing.T) {
+	cases := []struct {
+		name     string
+		thinking string
+		want     any    // expected reasoning_effort in translated request
+	}{
+		{"disabled→none", `{"type":"disabled"}`, "none"},
+		{"enabled→high", `{"type":"enabled","budget_tokens":8000}`, "high"},
+		{"adaptive→high", `{"type":"adaptive"}`, "high"},
+		{"absent→unset", "", nil},
+	}
+	for _, c := range cases {
+		req := anthropicReq{
+			Model:     "m1",
+			MaxTokens: 100,
+			Messages:  []anthropicMsg{{Role: "user", Content: "hi"}},
+		}
+		if c.thinking != "" {
+			req.Thinking = json.RawMessage(c.thinking)
+		}
+		out := anthropicToOpenAI(req)
+		got, ok := out["reasoning_effort"]
+		if c.want == nil {
+			if ok {
+				t.Errorf("[%s] reasoning_effort should be absent, got %v", c.name, got)
+			}
+			continue
+		}
+		if got != c.want {
+			t.Errorf("[%s] reasoning_effort = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+func TestBuildUpstreamBodyNoneDropsReasoningEffort(t *testing.T) {
+	body := buildUpstreamBody(map[string]any{
+		"model":           "m1",
+		"reasoning_effort": "none",
+	}, false)
+	if _, ok := body["reasoning_effort"]; ok {
+		t.Errorf("reasoning_effort=none must be dropped, got %v", body["reasoning_effort"])
+	}
+
+	// 默认仍然下发 high
+	body2 := buildUpstreamBody(map[string]any{"model": "m1"}, false)
+	if body2["reasoning_effort"] != defaultReasoningEffort {
+		t.Errorf("default reasoning_effort = %v, want %v", body2["reasoning_effort"], defaultReasoningEffort)
+	}
+}
+
+// TestBuildUpstreamBodyClampsMaxTokens 上游（OpenRouter/Meta）要求输出 token >= 16：
+// 0 视为未设置、1~15 兜到默认值，>=16 原样透传。背景：ZCode 等客户端的后台
+// 小任务会发很小的 max_tokens，触发 muse-spark 400 且错误被回退链吞掉。
+func TestBuildUpstreamBodyClampsMaxTokens(t *testing.T) {
+	cases := []struct {
+		name   string
+		params map[string]any
+		want   int
+	}{
+		{"absent", map[string]any{"model": "m1"}, defaultMaxTokens},
+		{"zero", map[string]any{"model": "m1", "max_tokens": float64(0)}, defaultMaxTokens},
+		{"tiny", map[string]any{"model": "m1", "max_tokens": float64(8)}, defaultMaxTokens},
+		{"completion-tiny", map[string]any{"model": "m1", "max_completion_tokens": float64(8)}, defaultMaxTokens},
+		{"boundary-16", map[string]any{"model": "m1", "max_tokens": float64(16)}, 16},
+		{"normal", map[string]any{"model": "m1", "max_tokens": float64(1024)}, 1024},
+	}
+	for _, tc := range cases {
+		body := buildUpstreamBody(tc.params, false)
+		if got, _ := body["max_tokens"].(int); got != tc.want {
+			t.Errorf("%s: max_tokens = %d, want %d", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestOpenAIToAnthropicThinkingBlock(t *testing.T) {
+	out := openAIToAnthropic(map[string]any{
+		"model": "m1",
+		"choices": []any{map[string]any{
+			"finish_reason": "stop",
+			"message": map[string]any{
+				"role":              "assistant",
+				"content":           "answer",
+				"reasoning_content": "thinking hard",
+			},
+		}},
+	})
+	blocks, ok := out["content"].([]any)
+	if !ok || len(blocks) != 2 {
+		t.Fatalf("want thinking+text blocks, got %v", out["content"])
+	}
+	first, _ := blocks[0].(map[string]any)
+	if first["type"] != "thinking" || first["thinking"] != "thinking hard" {
+		t.Errorf("first block should be thinking, got %v", first)
+	}
+	second, _ := blocks[1].(map[string]any)
+	if second["type"] != "text" || second["text"] != "answer" {
+		t.Errorf("second block should be text, got %v", second)
+	}
+
+	// 无 reasoning_content 时保持单 text 块
+	out2 := openAIToAnthropic(map[string]any{
+		"model": "m1",
+		"choices": []any{map[string]any{
+			"finish_reason": "stop",
+			"message":       map[string]any{"role": "assistant", "content": "plain"},
+		}},
+	})
+	blocks2, _ := out2["content"].([]any)
+	if len(blocks2) != 1 {
+		t.Fatalf("want single text block, got %v", blocks2)
+	}
+	if b, _ := blocks2[0].(map[string]any); b["type"] != "text" {
+		t.Errorf("block type = %v, want text", b["type"])
 	}
 }

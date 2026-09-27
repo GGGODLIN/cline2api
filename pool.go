@@ -6,6 +6,8 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -99,6 +101,41 @@ func addAccount(acc *Account) {
 	p.Accounts = append(p.Accounts, acc)
 	poolMu.Unlock()
 	savePool()
+}
+
+// findAccountByRefreshToken 按 refreshToken 查找已有账号（不存在返回 nil）。
+// 用于导入时的去重：同一个 refreshToken 只应存在一个账号。
+func findAccountByRefreshToken(refreshToken string) *Account {
+	refreshToken = strings.TrimSpace(refreshToken)
+	if refreshToken == "" {
+		return nil
+	}
+	p := loadPool()
+	poolMu.Lock()
+	defer poolMu.Unlock()
+
+	for _, a := range p.Accounts {
+		if strings.TrimSpace(a.RefreshToken) == refreshToken {
+			return a
+		}
+	}
+	return nil
+}
+
+// accountExists 判断该 refreshToken 是否已在账号池中。
+func accountExists(refreshToken string) bool {
+	return findAccountByRefreshToken(refreshToken) != nil
+}
+
+// isDuplicateImportToken 判断待导入的 refreshToken 是否应跳过（导入去重）：
+// 账号池中已存在同一 refreshToken，或本批次内已处理过（seen）。
+// seen 由调用方维护、在此更新，用于同一批次内的去重。
+func isDuplicateImportToken(refreshToken string, seen map[string]bool) bool {
+	if seen[refreshToken] || accountExists(refreshToken) {
+		return true
+	}
+	seen[refreshToken] = true
+	return false
 }
 
 func removeAccount(accountID string) bool {
@@ -225,6 +262,107 @@ func pickAccountForModelWithFallback(model string, fallbackToActive bool) *Accou
 	}
 	savePool()
 	return acc
+}
+
+// pickAccountForModelLeastUsed 在所有「模型未冷却」的 active 账号中，选择该模型
+// 历史用量最少的账号（并清掉已过期的冷却记录）。等量时按轮询索引取，保持原有
+// 公平性；全部不可用返回 nil。供回退链上的非首选模型使用：流量应摊到较少
+// 使用的账号上，而不是每次都砸在第一个可用账号。
+func pickAccountForModelLeastUsed(model string) *Account {
+	if model == "" {
+		return pickAccount()
+	}
+
+	p := loadPool()
+	poolMu.Lock()
+	defer poolMu.Unlock()
+
+	var best *Account
+	var bestCount int64
+	for _, a := range p.Accounts {
+		if a.Status != "active" {
+			continue
+		}
+		if until, cool := a.ModelCooldowns[model]; cool {
+			if time.Now().After(until) {
+				delete(a.ModelCooldowns, model)
+			} else {
+				continue // 该账号此模型冷却中
+			}
+		}
+		var cnt int64
+		if st, ok := a.ModelStats[model]; ok {
+			cnt = st.UsageCount
+		}
+		if best == nil || cnt < bestCount {
+			best, bestCount = a, cnt
+		}
+	}
+	if best == nil {
+		return nil
+	}
+	savePool()
+	return best
+}
+
+// sortModelsByAvailability 将回退链按「可用性优先」重排：
+//  1. 有未冷却账号的模型在前；
+//  2. 同组内按该模型的账号总用量升序——把流量摊到用得少的模型上，
+//     避免每次都选第一个可用模型、把它的额度打到冷却。
+//  3. 稳定排序：可用性与用量相同时保持管理员配置的优先级顺序。
+func sortModelsByAvailability(chain []string) []string {
+	p := loadPool()
+	poolMu.Lock()
+	defer poolMu.Unlock()
+
+	now := time.Now()
+	type cand struct {
+		model     string
+		avail     bool
+		minUsage  int64
+		origOrder int
+	}
+	cs := make([]cand, 0, len(chain))
+	for i, m := range chain {
+		avail := false
+		minUsage := int64(-1)
+		for _, a := range p.Accounts {
+			if a.Status != "active" {
+				continue
+			}
+			if until, cool := a.ModelCooldowns[m]; cool {
+				if now.After(until) {
+					delete(a.ModelCooldowns, m)
+				} else {
+					continue
+				}
+			}
+			avail = true
+			var cnt int64
+			if st, ok := a.ModelStats[m]; ok {
+				cnt = st.UsageCount
+			}
+			if minUsage < 0 || cnt < minUsage {
+				minUsage = cnt
+			}
+		}
+		cs = append(cs, cand{model: m, avail: avail, minUsage: minUsage, origOrder: i})
+	}
+	sort.SliceStable(cs, func(x, y int) bool {
+		if cs[x].avail != cs[y].avail {
+			return cs[x].avail
+		}
+		if cs[x].avail && cs[x].minUsage != cs[y].minUsage {
+			return cs[x].minUsage < cs[y].minUsage
+		}
+		return cs[x].origOrder < cs[y].origOrder
+	})
+	out := make([]string, len(cs))
+	for i, c := range cs {
+		out[i] = c.model
+	}
+	savePool()
+	return out
 }
 
 // pickAccountLocked 在已持有 poolMu 的前提下执行普通轮询挑选（供 pickAccountForModel 回退用）。

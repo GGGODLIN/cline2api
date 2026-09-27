@@ -4,7 +4,12 @@
 .cline-zen.json
 .cline-config.json
 cline-proxy
+cline-go-proxy
 cline-proxy.exe
+
+# local secrets & runtime logs
+credentials.txt
+proxy.log
 cline-proxy.exe~
 cline-go-proxy.exe
 .zcode/
@@ -30,3 +35,6 @@ build/bin/
 
 # wails frontend scaffolding leftovers
 frontend/wailsjs/
+
+# 本地参考缓存（opencode2api 参考，非本仓库代码）
+.cache/
