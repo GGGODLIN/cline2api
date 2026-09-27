@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -15,6 +16,24 @@ type freeModelRoundTripper func(*http.Request) (*http.Response, error)
 
 func (f freeModelRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
+}
+
+type flushSignalRecorder struct {
+	*httptest.ResponseRecorder
+	flushed chan struct{}
+	once    sync.Once
+}
+
+func newFlushSignalRecorder() *flushSignalRecorder {
+	return &flushSignalRecorder{
+		ResponseRecorder: httptest.NewRecorder(),
+		flushed:          make(chan struct{}),
+	}
+}
+
+func (r *flushSignalRecorder) Flush() {
+	r.ResponseRecorder.Flush()
+	r.once.Do(func() { close(r.flushed) })
 }
 
 func TestCallClineAPIRefreshRetryReplaysRequestBody(t *testing.T) {
@@ -1440,6 +1459,64 @@ func TestHandleAnthropicStreamEmitsEmptyToolInput(t *testing.T) {
 	body := recorder.Body.String()
 	if !strings.Contains(body, `"partial_json":"{}"`) {
 		t.Fatalf("response body missing empty tool input: %s", body)
+	}
+}
+
+func TestHandleAnthropicStreamFallsBackOnFirstPayloadWithoutModel(t *testing.T) {
+	isolateRequestLogs(t)
+	recorder := httptest.NewRecorder()
+	upstream := &http.Response{
+		StatusCode: http.StatusOK,
+		Body: io.NopCloser(strings.NewReader(
+			"data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n" +
+				"data: {\"model\":\"actual-model\",\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n" +
+				"data: [DONE]\n\n",
+		)),
+	}
+	reqLog := RequestLog{ID: "anthropic-stream-fallback", Model: "requested-model", StartedAt: time.Now()}
+
+	handleAnthropicStream(recorder, upstream, nil, &reqLog)
+
+	body := recorder.Body.String()
+	if strings.Count(body, "event: message_start") != 1 {
+		t.Fatalf("message_start count = %d, want 1: %s", strings.Count(body, "event: message_start"), body)
+	}
+	if !strings.Contains(body, `"model":"requested-model"`) {
+		t.Fatalf("response body missing requested-model fallback: %s", body)
+	}
+	if start, content := strings.Index(body, "event: message_start"), strings.Index(body, "event: content_block_start"); start < 0 || content < 0 || start > content {
+		t.Fatalf("message_start must precede content blocks: %s", body)
+	}
+}
+
+func TestHandleAnthropicStreamFlushesHeadersBeforeFirstPayload(t *testing.T) {
+	isolateRequestLogs(t)
+	reader, writer := io.Pipe()
+	recorder := newFlushSignalRecorder()
+	upstream := &http.Response{StatusCode: http.StatusOK, Body: reader}
+	reqLog := RequestLog{ID: "anthropic-slow-first-payload", Model: "requested-model", StartedAt: time.Now()}
+	done := make(chan struct{})
+	go func() {
+		handleAnthropicStream(recorder, upstream, nil, &reqLog)
+		close(done)
+	}()
+
+	select {
+	case <-recorder.flushed:
+	case <-time.After(250 * time.Millisecond):
+		writer.Close()
+		<-done
+		t.Fatal("response headers were not flushed before the first upstream payload")
+	}
+
+	if _, err := writer.Write([]byte("data: {\"model\":\"actual-model\",\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n")); err != nil {
+		t.Fatalf("write upstream payload: %v", err)
+	}
+	writer.Close()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("stream handler did not finish after upstream closed")
 	}
 }
 

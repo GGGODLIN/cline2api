@@ -2331,6 +2331,9 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 	if !ok {
 		return
 	}
+	// message_start waits for upstream model metadata; flush headers first so a slow
+	// first chunk does not look like a connection that never opened.
+	flusher.Flush()
 
 	emit := func(event string, data any) {
 		d, _ := json.Marshal(data)
