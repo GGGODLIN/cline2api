@@ -778,6 +778,16 @@ func hasToolUseBlocks(content any) bool {
 	return false
 }
 
+func numericInt(value any) (int, bool) {
+	switch number := value.(type) {
+	case int:
+		return number, true
+	case float64:
+		return int(number), true
+	default:
+		return 0, false
+	}
+}
 // modelMaxOutputLimit 返回模型已知的最大输出 token 硬上限（0=未知，不封顶）。
 // 已知硬限制表优先（gemini-3.8-flash 等）；其次取池中该模型的 Output 元数据
 // （remote 同步 / 管理页设置 / 用户自定义模型）。zen 模型的 Output 是压缩预算
@@ -805,10 +815,10 @@ func buildUpstreamBody(params map[string]any, stream bool) map[string]any {
 
 	maxTokens := maxOutputTokens()
 	source := ""
-	if mt, ok := params["max_tokens"].(float64); ok {
-		maxTokens, source = clampMaxTokens(int(mt)), "max_tokens"
-	} else if mt, ok := params["max_completion_tokens"].(float64); ok {
-		maxTokens, source = clampMaxTokens(int(mt)), "max_completion_tokens"
+	if mt, ok := numericInt(params["max_tokens"]); ok {
+		maxTokens, source = clampMaxTokens(mt), "max_tokens"
+	} else if mt, ok := numericInt(params["max_completion_tokens"]); ok {
+		maxTokens, source = clampMaxTokens(mt), "max_completion_tokens"
 	}
 	// 客户端发的 0 视为未设置、1~15 低于上游硬下限：一律兜到默认值，
 	// 否则 muse-spark 等模型直接 400 且错误会被回退链吞掉
