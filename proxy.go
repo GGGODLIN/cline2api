@@ -1360,6 +1360,10 @@ func callClineAPIWithAccountCtx(ctx context.Context, acc *Account, params map[st
 				savePool()
 			}
 		}
+		// 上游明确报「模型不存在」时清理下架残留（同步标记 Delisted 保留的模型）
+		if model, _ := body["model"].(string); model != "" && isModelGoneError(resp.StatusCode, bodyStr) {
+			markModelGone(model)
+		}
 		return nil, acc, &clineAPIError{statusCode: resp.StatusCode, message: truncate(bodyStr, 500)}
 	}
 

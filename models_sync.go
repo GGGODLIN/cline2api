@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -12,7 +13,8 @@ import (
 
 // clineRecommendedModelsURL 是 Cline 官方的「推荐/免费模型」接口（无需认证）。
 // 参考 model-api.md：Cline 4.1.15 的 Free Models 由该接口直接返回。
-const clineRecommendedModelsURL = "https://api.cline.bot/api/v1/ai/cline/recommended-models"
+// var 便于测试注入 httptest 假服务。
+var clineRecommendedModelsURL = "https://api.cline.bot/api/v1/ai/cline/recommended-models"
 
 const modelSyncTimeout = 10 * time.Second
 
@@ -243,9 +245,16 @@ func syncClineModels() modelSyncResult {
 			res.Added = append(res.Added, m.ID)
 		}
 	}
-	for id := range oldIDs {
-		if !seen[id] {
-			res.Removed = append(res.Removed, id)
+	// 上游列表里消失的旧模型不删除：实测官方列表移除后模型往往仍可继续用，
+	// 只打上 Delisted 标记（管理页显示「已下架」，支持手动移除）；
+	// 重新出现时新条目天然无标记，标记自动清除。res.Removed 只记录新下架的。
+	for _, m := range p.Models {
+		if m.Source == "remote" && !seen[m.ID] {
+			if !m.Delisted {
+				res.Removed = append(res.Removed, m.ID)
+			}
+			m.Delisted = true
+			kept = append(kept, m)
 		}
 	}
 	kept = append(kept, remote...)
@@ -272,6 +281,47 @@ func syncClineModels() modelSyncResult {
 // triggerModelSync 供管理后台手动触发同步；非阻塞等待完成并返回结果。
 func triggerModelSync() modelSyncResult {
 	return syncClineModels()
+}
+
+// modelGoneRe 匹配上游「模型不存在」类错误响应体（400/404）。
+var modelGoneRe = regexp.MustCompile(
+	`(?i)model[\s_-]*(not[\s_-]*found|does\s+not\s+exist|no\s+such|unknown|invalid)|(invalid|unknown|no\s+such)[\s_-]*model`)
+
+// isModelGoneError 判断上游响应是否为明确的「模型不存在」类错误（400/404）。
+func isModelGoneError(status int, body string) bool {
+	if status != http.StatusBadRequest && status != http.StatusNotFound {
+		return false
+	}
+	return modelGoneRe.MatchString(body)
+}
+
+// markModelGone 上游明确报「模型不存在」时按请求校验自动清理：只删同步打上
+// Delisted 标记的模型 —— 官方列表下架后仍保留的残留，实测大概率还能用，但
+// 上游真删了就该清掉。仍在官方列表里的模型报错可能是瞬时路由问题，不凭单次
+// 请求误删；自定义模型（Custom）永远留给用户手动处理。
+func markModelGone(model string) {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return
+	}
+	p := loadPool()
+	poolMu.Lock()
+	found := false
+	for i, m := range p.Models {
+		if m.ID == model && m.Delisted && !m.Custom {
+			p.Models = append(p.Models[:i], p.Models[i+1:]...)
+			found = true
+			break
+		}
+	}
+	if found && p.DefaultModel == model {
+		p.DefaultModel = ""
+	}
+	poolMu.Unlock()
+	if found {
+		savePool()
+		log.Printf("model %q removed: upstream reports it no longer exists (was delisted)", model)
+	}
 }
 
 // getModelSyncResult 返回最近一次同步结果（供管理后台展示）。
