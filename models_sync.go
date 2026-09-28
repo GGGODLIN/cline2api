@@ -211,11 +211,15 @@ func syncClineModels() modelSyncResult {
 				Source:   "remote",
 			}
 			// 远程接口不带 context/maxTokens：按已知硬限制表补全，
-			// 用户锁定过的值（MetaLocked）优先于表。
+			// 用户锁定过的值（MetaLocked）优先于表；未收录的模型默认 1M
+			// 上下文（主流模型现状，与 zen 同步的默认一致，仅展示与编辑
+			// 预填，不参与压缩/封顶）。Output 保持 0=未知，不引入意外封顶。
 			if old, ok := oldRemote[m.ID]; ok && old.MetaLocked {
 				entry.Context, entry.Output, entry.MetaLocked = old.Context, old.Output, true
 			} else if meta, ok := lookupClineModelMeta(m.ID); ok {
 				entry.Context, entry.Output = meta.Context, meta.Output
+			} else if entry.Context == 0 {
+				entry.Context = 1048576
 			}
 			remote = append(remote, entry)
 		}

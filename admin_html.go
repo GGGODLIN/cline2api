@@ -2501,7 +2501,7 @@ function fmtTokens(n) {
 
 // 修改模型上下文/最大输出：压缩阈值按此计算，设置后 zen 同步保留该值
 async function editModelMeta(id, ctx, out) {
-  const c = prompt(t('上下文窗口 (token)') + ' - ' + id, ctx || 200000);
+  const c = prompt(t('上下文窗口 (token)') + ' - ' + id, ctx || 1048576);
   if (c === null) return;
   const o = prompt(t('最大输出 (token)'), out || 32768);
   if (o === null) return;

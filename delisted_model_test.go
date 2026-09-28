@@ -120,6 +120,8 @@ func TestSyncClineModelsMarksDelisted(t *testing.T) {
 	}
 	if _, ok := byID["new-free/fresh-model"]; !ok {
 		t.Error("new model from the list should be added")
+	} else if got := byID["new-free/fresh-model"].Context; got != 1048576 {
+		t.Errorf("new model default context = %d, want 1048576 (1M)", got)
 	}
 
 	// 第二次同步：模型重新回到官方列表 → 标记清除
