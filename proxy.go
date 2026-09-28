@@ -2670,6 +2670,8 @@ func handleAnthropicStream(ctx context.Context, sw *sseWriter, upstream *http.Re
 	// 必须从第 0 秒起就有事件流动 —— 大上下文下上游排队/预填充实测 TTFT 可达 3~4 分钟，
 	// 期间只有注释行（不是事件）时，Claude Code 的流空闲看门狗会把连接当成卡死。
 	// 重试沿用同一信封（sw.envelope 幂等），客户端看不到任何重试痕迹。
+	// model 取 reqLog.Model（调用方已在 fetch 时更新为含回退的实际服务模型），
+	// 不能发空串 —— 客户端会丢失流式消息的模型身份。
 	sw.start()
 	if !sw.envelope {
 		sw.envelope = true
@@ -2680,7 +2682,7 @@ func handleAnthropicStream(ctx context.Context, sw *sseWriter, upstream *http.Re
 				"type":        "message",
 				"role":        "assistant",
 				"content":     []any{},
-				"model":       "",
+				"model":       reqLog.Model,
 				"stop_reason": nil,
 			},
 		})
