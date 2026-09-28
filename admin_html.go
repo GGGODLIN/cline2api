@@ -109,13 +109,15 @@ th{color:var(--text2);font-weight:600;font-size:11px;text-transform:uppercase;le
 tbody tr:last-child td{border-bottom:none}
 tbody tr{transition:background 0.15s var(--ease)}
 tbody tr:hover{background:var(--surface2)}
-.account-table th:first-child,.account-table td:first-child{width:17%}
-.account-table td:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.account-table th:nth-child(2),.account-table td:nth-child(2){width:9%}
-.account-table th:nth-child(3),.account-table td:nth-child(3){width:6%;text-align:right;font-variant-numeric:tabular-nums}
-.account-table th:nth-child(4),.account-table td:nth-child(4),.account-table th:nth-child(5),.account-table td:nth-child(5),.account-table th:nth-child(6),.account-table td:nth-child(6),.account-table th:nth-child(7),.account-table td:nth-child(7){width:7%;text-align:right;font-variant-numeric:tabular-nums}
-.account-table th:nth-child(8),.account-table td:nth-child(8),.account-table th:nth-child(9),.account-table td:nth-child(9){width:11%;white-space:nowrap;color:var(--text2);overflow:hidden;text-overflow:ellipsis}
+/* 账号表格列宽：1 勾选 / 2 序号 / 3 邮箱(自适应省略) / 4 状态 / 5-9 数字右对齐 / 10-11 时间不折行 / 12 操作 */
+.account-table th:nth-child(1),.account-table td:nth-child(1){width:36px;min-width:36px;text-align:center}
+.account-table th:nth-child(2),.account-table td:nth-child(2){width:44px;min-width:44px;color:var(--text3)}
+.account-table td:nth-child(3){overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.account-table th:nth-child(4),.account-table td:nth-child(4){width:9%}
+.account-table th:nth-child(5),.account-table td:nth-child(5),.account-table th:nth-child(6),.account-table td:nth-child(6),.account-table th:nth-child(7),.account-table td:nth-child(7),.account-table th:nth-child(8),.account-table td:nth-child(8),.account-table th:nth-child(9),.account-table td:nth-child(9){width:7%;text-align:right;font-variant-numeric:tabular-nums}
+.account-table th:nth-child(10),.account-table td:nth-child(10),.account-table th:nth-child(11),.account-table td:nth-child(11){width:10%;color:var(--text2)}
 .account-table th:last-child,.account-table td:last-child{width:172px;min-width:172px;text-align:right;white-space:nowrap}
+.account-table input[type="checkbox"]{width:16px;height:16px;accent-color:var(--accent);cursor:pointer;vertical-align:middle}
 .account-table td:last-child .btn{width:32px;padding-left:0;padding-right:0;justify-content:center}
 .account-email{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);font-weight:500}
 .account-cards{display:none}
@@ -1222,6 +1224,11 @@ const I18N = {
   '个账号 · 每页': ' accounts · per page ',
   '全选本页': 'Select all on this page',
   '已下架': 'Delisted',
+  '免费模型': 'Free models',
+  '付费模型': 'Paid models',
+  '（免费）': ' (free)',
+  '（付费）': ' (paid)',
+  '（当前）': ' (current)',
   '移除（已下架模型支持手动移除）': 'Remove (delisted models can be removed manually)',
   '已下架（保留在列表，标记显示）': 'Delisted (kept in list, marked)',
   '已从上游官方列表移除，实测可能仍可用；同步只标记不删除，上游报模型不存在时自动清理': 'Removed from the upstream official list but may still work; sync only marks it, and it is auto-cleaned when the upstream reports the model no longer exists',
@@ -1736,8 +1743,6 @@ async function loadAccounts() {
     };
     tbody.innerHTML = pageList.map((a, i) => {
       const seq = start + i + 1;
-      const lu = a.lastUsed ? new Date(a.lastUsed).toLocaleString(LC()) : '-';
-      const cr = a.createdAt ? new Date(a.createdAt).toLocaleString(LC()) : '-';
       const statusBadge = a.status === 'cooldown' && a.cooldownUntil
         ? '<span class="status cooldown status-cooldown" title="' + t('冷却 · 剩余 ') + formatCooldown(a.cooldownUntil) + '"><span class="cd-icon">⏳</span><span class="cd-time">' + formatCooldown(a.cooldownUntil) + '</span></span>'
         : '<span class="status ' + a.status + '"><span class="status-dot ' + a.status + '"></span>' + (sn[a.status] || a.status) + '</span>';
@@ -1754,8 +1759,8 @@ async function loadAccounts() {
         '<td>' + formatTokenCount(a.completionTokens) + '</td>' +
         '<td>' + formatTokenCount(a.totalTokens) + '</td>' +
         '<td>' + formatTokenCount(a.cachedTokens) + '</td>' +
-        '<td class="mono" style="font-size:11px">' + lu + '</td>' +
-        '<td class="mono" style="font-size:11px">' + cr + '</td>' +
+        '<td>' + fmtDateTime2(a.lastUsed) + '</td>' +
+        '<td>' + fmtDateTime2(a.createdAt) + '</td>' +
         '<td style="white-space:nowrap">' + expander +
           '<button class="btn btn-sm" onclick="testAccount(\'' + a.accountId + '\',this)" title="测试">⚡</button> ' +
           '<button class="btn btn-sm" onclick="resetAccount(\'' + a.accountId + '\')" title="重置">↻</button> ' +
@@ -1900,6 +1905,14 @@ async function deleteSelectedAccounts(btn) {
   else toast(t('已删除 ') + ok + t(' 个账号'), 'success');
   await loadAccounts();
   await loadStats();
+}
+
+// 表格时间列：日期一行、时间灰色小字一行，固定不折行
+function fmtDateTime2(v) {
+  if (!v) return '<span style="color:var(--text3)">-</span>';
+  const d = new Date(v);
+  return '<div style="white-space:nowrap">' + d.toLocaleDateString(LC()) + '</div>' +
+    '<div style="white-space:nowrap;font-size:10px;color:var(--text3)">' + d.toLocaleTimeString(LC()) + '</div>';
 }
 
 // 展开/收起账号的模型统计子行（表格视图）
@@ -2471,9 +2484,9 @@ function renderModelChip(m) {
   if (m.context) {
     item += '<span style="font-size:11px;color:var(--text3);margin-left:4px" title="' + t('上下文窗口 / 最大输出 (token)，点击⚙修改') + '">ctx ' + fmtTokens(m.context) + '</span>';
   }
-  if (isOcModel(m) || m.custom) {
-    item += '<button class="btn btn-sm" style="padding:2px 6px" onclick="editModelMeta(\'' + esc(m.id) + '\',' + (m.context || 0) + ',' + (m.output || 0) + ')" title="' + t('上下文窗口 / 最大输出 (token)，点击⚙修改') + '">⚙</button>';
-  }
+  // 所有模型都开放上下文/最大输出编辑：Cline 模型不在已知硬限制表时，
+  // 手动设置的 Output 会作为 modelMaxOutputLimit 的封顶值生效
+  item += '<button class="btn btn-sm" style="padding:2px 6px" onclick="editModelMeta(\'' + esc(m.id) + '\',' + (m.context || 0) + ',' + (m.output || 0) + ')" title="' + t('上下文窗口 / 最大输出 (token)，点击⚙修改') + '">⚙</button>';
   if (m.custom || m.delisted) {
     item += '<button class="btn btn-sm btn-danger" style="padding:2px 6px" onclick="deleteModel(\'' + esc(m.id) + '\')" title="' + (m.delisted ? t('移除（已下架模型支持手动移除）') : t('删除')) + '">✕</button>';
   }
@@ -2749,10 +2762,21 @@ async function loadConfig() {
     if (c.poolPath) _('settingPoolPath').value = c.poolPath;
     if (c.defaultModel !== undefined) {
       const sel = _('settingDefModel');
-      // 先用缓存模型填充下拉，再选中当前默认值
-      const opts = (_cachedModels || []).map(m =>
-        '<option value="' + esc(m.id) + '"' + (m.id === c.defaultModel ? ' selected' : '') + '>' + esc(m.id) + '</option>'
-      ).join('');
+      // 免费一组、付费一组（optgroup 分类 + 选项标注计费）；
+      // 当前默认值不在可用列表时补在开头，避免选中值丢失
+      const has = id => (_cachedModels || []).some(m => m.id === id);
+      let opts = '';
+      if (c.defaultModel && !has(c.defaultModel)) {
+        opts += '<option value="' + esc(c.defaultModel) + '" selected>' + esc(c.defaultModel) + esc(t('（当前）')) + '</option>';
+      }
+      [{ key: 'free', label: t('免费模型'), tag: t('（免费）') },
+       { key: 'pass', label: t('付费模型'), tag: t('（付费）') }].forEach(g => {
+        const items = (_cachedModels || []).filter(m => (m.cost === 'free') === (g.key === 'free'));
+        if (!items.length) return;
+        opts += '<optgroup label="' + esc(g.label) + ' (' + items.length + ')">' +
+          items.map(m => '<option value="' + esc(m.id) + '"' + (m.id === c.defaultModel ? ' selected' : '') + '>' + esc(m.id) + esc(g.tag) + '</option>').join('') +
+          '</optgroup>';
+      });
       sel.innerHTML = opts || '<option value="">' + t('（无可用模型）') + '</option>';
     }
     // 本机 IP 展示（监听 0.0.0.0 时局域网访问地址）
