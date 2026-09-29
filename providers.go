@@ -411,7 +411,7 @@ var providerPresets = map[string]providerPreset{
 }
 
 // ============================================================================
-// Fallback 集成：自定义 provider 参与 modelFallbackChain
+// 路由集成：自定义 provider 以相同 model ID 参与 strict 与 free 路径
 // ============================================================================
 
 // callCustomProviderAPI 尝试用自定义 provider 服务请求；成功返回响应。

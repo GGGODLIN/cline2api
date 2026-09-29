@@ -508,42 +508,6 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 		}
 		upResp, err := callZenAPI(chat, isStream)
 		if err != nil {
-			if fbResp, fbAcc, fbErr, attempted := zenFailoverToCline(chat, isStream); attempted {
-				if fbErr == nil {
-					log.Printf("  responses failover: serving %q via cline pool", chatModel)
-					stampUpstream(&reqLog, chat) // 归因实际服务方（provider / cline）
-					if fm, ok := chat["model"].(string); ok && fm != "" {
-						reqLog.Model = fm // zen 故障转移后记录实际服务模型
-					}
-					if fbAcc != nil {
-						reqLog.AccountID = fbAcc.AccountID
-						reqLog.AccountEmail = fbAcc.Email
-					}
-					defer fbResp.Body.Close()
-					if isStream {
-						w.Header().Set("Content-Type", "text/event-stream")
-						w.Header().Set("Cache-Control", "no-cache")
-						w.Header().Set("Connection", "keep-alive")
-						w.Header().Set("Access-Control-Allow-Origin", "*")
-						w.WriteHeader(http.StatusOK)
-						chatStreamToResponses(w, fbResp, &reqLog, fbAcc)
-						return
-					}
-					var raw map[string]any
-					if err := json.NewDecoder(fbResp.Body).Decode(&raw); err != nil {
-						finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, "decode response: "+err.Error())
-						writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
-						return
-					}
-					out2 := normalizeOpenAIResponse(unwrapDataEnvelope(raw))
-					usage := parseTokenUsage(out2["usage"])
-					recordTokenUsage(fbAcc, reqLog.Model, usage)
-					finalizeRequestLog(&reqLog, usage, time.Time{}, reqLog.StartedAt, true, "")
-					writeJSON(w, http.StatusOK, chatToResponses(out2))
-					return
-				}
-				err = fbErr
-			}
 			log.Printf("  responses api error: %v", err)
 			finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, err.Error())
 			writeJSON(w, http.StatusBadGateway, map[string]any{

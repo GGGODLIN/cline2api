@@ -519,24 +519,6 @@ func startProxy(host string, port int) error {
 			}
 			resp, err := callZenAPI(params, isStream)
 			if err != nil {
-				if fbResp, fbAcc, fbErr, attempted := zenFailoverToCline(params, isStream); attempted {
-					if fbErr == nil {
-						log.Printf("  chat failover: serving %q via cline pool", model)
-						stampUpstream(&reqLog, params) // 归因实际服务方（provider / cline）
-						if fbAcc != nil {
-							reqLog.AccountID = fbAcc.AccountID
-							reqLog.AccountEmail = fbAcc.Email
-						}
-						defer fbResp.Body.Close()
-						if isStream {
-							handleStreamResponse(w, fbResp, fbAcc, &reqLog)
-						} else {
-							handleNonStreamResponse(w, fbResp, fbAcc, &reqLog)
-						}
-						return
-					}
-					err = fbErr
-				}
 				log.Printf("  api error: %v", err)
 				finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, err.Error())
 				writeJSON(w, http.StatusBadGateway, map[string]any{
@@ -1009,97 +991,37 @@ func callClineAPI(params map[string]any, stream bool) (*http.Response, *Account,
 	case freeModelCanaryAlias:
 		return callFreeClineAPIForModel(params, stream, freeModelCanary)
 	}
-	// zen 免费模型进入 cline 池仅发生在 zen 故障转移期间：改写成 cline 侧可用的
-	// free 模型链，否则 Cline 上游会报 "invalid model format. Expected format:
-	// modelType/model"（zen 的裸模型 ID 不符合 Cline 的 provider/model 格式）。
-	if zm, ok := resolveZenInfo(model); ok && isZenFreeModel(zm) {
-		log.Printf("  zen failover: rewriting zen model %q to cline free chain", model)
-		return callFreeClineAPI(params, stream)
+	// 显式模型严格路由：相同 model ID 的自定义 provider 优先，失败后只轮换
+	// Cline 账号；不进入 modelChain、free 链或 zen。
+	if pResp, pErr, attempted := callCustomProviderAPI(withModel(params, model), stream); attempted {
+		if pErr == nil {
+			params[servedByParam] = upstreamProvider
+			return pResp, nil, nil
+		}
+		log.Printf("  provider attempt failed for %q: %v", model, pErr)
 	}
 
-	// 显式模型请求降级序列：
-	//  1. 自定义 provider（若该模型接入了 provider）
-	//  2. 客户端点名模型走 Cline 池
-	//  3. modelChain（管理员配置或内置 free 链）逐个降级
-	//  4. 全部失败 → 明确报错
-	// 可用性感知重排：点名模型保持首位，其余按「未冷却优先、用量少优先」
-	// 重排，避免回退流量每次都集中砸在第一个可用模型上直到它也冷却。
-	sorted := sortModelsByAvailability(modelFallbackChain(model))
-	chain := make([]string, 0, len(sorted)+1)
-	chain = append(chain, model)
-	for _, m := range sorted {
-		if m != model {
-			chain = append(chain, m)
+	for {
+		acc := pickAccountForModelStrict(model)
+		if acc == nil {
+			break
 		}
-	}
-	for _, m := range chain {
-		// 先试自定义 provider
-		if pResp, pErr, attempted := callCustomProviderAPI(withModel(params, m), stream); attempted {
-			if pErr == nil {
-				if m != model {
-					log.Printf("  model fallback: %q unavailable, serving via provider %q", model, m)
-				}
-				params["model"] = m // 回写实际服务模型，供请求日志归因
-				params[servedByParam] = upstreamProvider
-				return pResp, nil, nil
-			}
-			log.Printf("  provider attempt failed for %q: %v", m, pErr)
+		resp, usedAcc, err := callClineAPIWithAccountCtx(context.Background(), acc, withModel(params, model), stream)
+		if err == nil {
+			return resp, usedAcc, nil
 		}
-
-		// 点名模型保持原有轮询语义；链上的降级模型改用「最久未用优先」，
-		// 避免所有降级流量都压到第一个可用账号/模型的额度上。
-		pickAcc := pickAccountForModelStrict
-		if m != model {
-			pickAcc = pickAccountForModelLeastUsed
+		var accountErr *clineAccountUnavailableError
+		if errors.As(err, &accountErr) {
+			continue
 		}
-		for {
-			acc := pickAcc(m)
-			if acc == nil {
-				break // 该模型所有账号均冷却/不可用 → 尝试链上下一个模型
-			}
-			resp, usedAcc, err := callClineAPIWithAccountCtx(context.Background(), acc, withModel(params, m), stream)
-			if err == nil {
-				if m != model {
-					log.Printf("  model fallback: %q cooling on all accounts, serving via %q", model, m)
-				}
-				params["model"] = m // 回写实际服务模型，供请求日志归因
-				return resp, usedAcc, nil
-			}
-			var accountErr *clineAccountUnavailableError
-			if errors.As(err, &accountErr) {
-				continue
-			}
-			apiErr, ok := err.(*clineAPIError)
-			if !ok || apiErr.statusCode != http.StatusTooManyRequests {
-				// 非 429 错误：若后面还有候选（provider / 链）则继续降级，否则透传
-				if !hasAnyFallbackLeft(model, m) {
-					return nil, usedAcc, err
-				}
-				break
-			}
-			// 429：模型冷却已记录，换下一个账号；全部冷却后降级到下一个模型
+		apiErr, ok := err.(*clineAPIError)
+		if !ok || apiErr.statusCode != http.StatusTooManyRequests {
+			return nil, usedAcc, err
 		}
-	}
-	// 终极兜底：free 链（手动链全部失败时自动切换）
-	if model != "free" && !isFreeAliasModel(model) {
-		fp := withModel(params, "free")
-		if resp, acc, err := callFreeClineAPI(fp, stream); err == nil {
-			log.Printf("  auto fallback: all configured options failed for %q, served by free chain", model)
-			if fm, ok := fp["model"].(string); ok && fm != "" {
-				params["model"] = fm // callFreeClineAPI 就地改写 fp，取回实际服务模型
-			}
-			if v, ok := fp[servedByParam].(string); ok {
-				params[servedByParam] = v // provider 经 free 链服务时同步归因标记
-			}
-			return resp, acc, nil
-		}
-	}
-	// Cline 侧（含 free 链）全部耗尽 → 反向故障转移到 zen 免费模型
-	if fbResp, attempted := clineFailoverToZen(params, stream); attempted {
-		return fbResp, nil, nil
+		// 429 已记录为这个账号的模型级冷却；继续找可服务同一模型的账号。
 	}
 	if hasActiveAccounts() {
-		return nil, nil, &freeModelUnavailableError{message: fmt.Sprintf("model %q is cooling on all accounts and no fallback model is available", model)}
+		return nil, nil, &freeModelUnavailableError{message: fmt.Sprintf("model %q is unavailable on all accounts", model)}
 	}
 	return nil, nil, fmt.Errorf("no active accounts available. Use --login or admin API to add accounts")
 }
@@ -1112,19 +1034,6 @@ func withModel(params map[string]any, model string) map[string]any {
 	}
 	cp["model"] = model
 	return cp
-}
-
-// isFreeAliasModel 判断是否为 "free" 别名或链内免费模型（避免重复兜底）。
-func isFreeAliasModel(model string) bool {
-	if model == "free" {
-		return true
-	}
-	for _, m := range defaultFreeChain() {
-		if m == model {
-			return true
-		}
-	}
-	return false
 }
 
 // defaultFreeChain 动态派生默认回退链（管理员未配置 modelChain 时）：
@@ -1215,31 +1124,18 @@ func filterStaleModels(chain []string) []string {
 	return out
 }
 
-// hasAnyFallbackLeft 判断点名模型之后是否还有候选（决定 500 是否透传）。
-func hasAnyFallbackLeft(requested, current string) bool {
-	chain := modelFallbackChain(requested)
-	for i, m := range chain {
-		if m == current {
-			return i < len(chain)-1
-		}
-	}
-	return false
-}
-
-// modelFallbackChain 显式模型的降级序列：点名模型优先，其后是管理员配置的
-// 回退链（modelChain）；未配置时动态派生默认链（排除已下架模型）。均去重。
-// 配置链会先经 filterStaleModels 剔除已下架条目；点名模型本身始终保留——
-// 它是客户端显式要求的（可能由 zen / provider 服务，不归本仓判定）。
-func modelFallbackChain(requested string) []string {
+// freeChainWithCurrent 返回 free intent 的当前模型与其余链上候选，供流式
+// 首 token 前失败时判断是否仍有其他模型可用。显式模型路由不会调用此函数。
+func freeChainWithCurrent(current string) []string {
 	configured := getProxyConfig().ModelChain
 	if len(configured) == 0 {
 		configured = defaultFreeChain()
 	}
 	configured = filterStaleModels(configured)
 	chain := make([]string, 0, 1+len(configured))
-	chain = append(chain, requested)
+	chain = append(chain, current)
 	for _, m := range configured {
-		if m != requested {
+		if m != current {
 			chain = append(chain, m)
 		}
 	}
@@ -1736,7 +1632,7 @@ func modelCooldownActive(acc *Account, model string) bool {
 // hasAlternativeModel 判断降级链上是否还有未冷却的候选模型。
 // 用于避免「所有模型都被冷却」导致整条链不可用。
 func hasAlternativeModel(acc *Account, current string) bool {
-	for _, m := range modelFallbackChain(current) {
+	for _, m := range freeChainWithCurrent(current) {
 		if m == "" || m == current {
 			continue
 		}
@@ -2321,25 +2217,8 @@ func openAIToAnthropic(openAI map[string]any) map[string]any {
 	return out
 }
 
-// zenFailoverToCline zen 调用失败后的透明降级：改走 cline 账号池 free 模型链。
-// attempted=false 表示未启用故障转移，调用方维持原错误路径。
-// 注意：失败计数由 callZenAPI 内部标记（每请求恰好一次），此处不再重复计数，
-// 否则限流/服务错误路径 + 此处各计一次，故障转移会被过早触发。
-func zenFailoverToCline(params map[string]any, stream bool) (*http.Response, *Account, error, bool) {
-	cfg := getZenConfig()
-	if !cfg.Failover {
-		return nil, nil, nil, false
-	}
-	orig, _ := params["model"].(string)
-	log.Printf("  zen failover: %q unavailable upstream, falling back to cline free pool", orig)
-	params["model"] = "free"
-	resp, acc, err := callFreeClineAPI(params, stream)
-	return resp, acc, err, true
-}
-
-// clineFailoverToZen Cline 侧（含 free 池链）全部耗尽后的反向故障转移：
-// 落到 opencode zen 免费模型。与 zenFailoverToCline 方向相反，形成双向闭环——
-// 任一免费上游挂掉，流量自动落到另一条。zen 未启用或处于故障转移窗口
+// clineFailoverToZen 只供 model="free" 的 Cline 链耗尽后降级到 opencode zen。
+// zen 未启用或处于故障转移窗口
 // （连续失败被判定不可达）时不尝试；最多试 3 个免费模型，避免在坏模型上反复烧时间。
 func clineFailoverToZen(params map[string]any, stream bool) (*http.Response, bool) {
 	cfg := getZenConfig()
@@ -2417,49 +2296,6 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 		}
 		resp, err := callZenAPI(openAIReq, req.Stream)
 		if err != nil {
-			if fbResp, fbAcc, fbErr, attempted := zenFailoverToCline(openAIReq, req.Stream); attempted {
-				if fbErr == nil {
-					log.Printf("  anthropic failover: serving %q via cline pool", req.Model)
-					stampUpstream(&reqLog, openAIReq) // 归因实际服务方（provider / cline）
-					if fm, ok := openAIReq["model"].(string); ok && fm != "" {
-						reqLog.Model = fm // zen 故障转移后记录实际服务模型
-					}
-					if fbAcc != nil {
-						reqLog.AccountID = fbAcc.AccountID
-						reqLog.AccountEmail = fbAcc.Email
-					}
-					defer fbResp.Body.Close()
-					if req.Stream {
-						sw := newSSEWriter(w)
-						// 这条降级路径没有重试，所以用宽容的上限，尽量把慢但能出的流交给客户端。
-						if !handleAnthropicStream(r.Context(), sw, fbResp, fbAcc, &reqLog, lastAttemptFirstContentTimeout) {
-							log.Printf("  anthropic stream: failover upstream failed before any content")
-							finishAnthropicStreamFailure(sw, w, &reqLog, http.StatusBadGateway,
-								"stream failed before first token", "upstream stream failed before first token")
-						}
-					} else {
-						var raw map[string]any
-						if err := json.NewDecoder(fbResp.Body).Decode(&raw); err != nil {
-							finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, "decode response: "+err.Error())
-							writeJSON(w, http.StatusInternalServerError, map[string]any{
-								"error": map[string]string{"message": err.Error(), "type": "parse_error"},
-							})
-							return
-						}
-						out2 := normalizeOpenAIResponse(unwrapDataEnvelope(raw))
-						usage := parseTokenUsage(out2["usage"])
-						recordTokenUsage(fbAcc, reqLog.Model, usage)
-						finalizeRequestLog(&reqLog, usage, time.Time{}, reqLog.StartedAt, true, "")
-						anthropicResp := openAIToAnthropic(out2)
-						if hasToolUseBlocks(anthropicResp["content"]) {
-							anthropicResp["stop_reason"] = "tool_use"
-						}
-						writeJSON(w, http.StatusOK, anthropicResp)
-					}
-					return
-				}
-				err = fbErr
-			}
 			log.Printf("  anthropic api error: %v", err)
 			finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, err.Error())
 			writeJSON(w, http.StatusBadGateway, map[string]any{
@@ -2517,6 +2353,7 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 
 	if req.Stream {
 		streamAnthropicWithRetry(r.Context(), w, func() (*http.Response, *Account, error) {
+			openAIReq["model"] = req.Model
 			resp, acc, err := callClineAPI(openAIReq, req.Stream)
 			if err == nil {
 				if effectiveModel, ok := openAIReq["model"].(string); ok && effectiveModel != "" {
@@ -2525,7 +2362,7 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 				stampUpstream(&reqLog, openAIReq) // 归因实际服务方（provider / opencode / cline）
 			}
 			return resp, acc, err
-		}, &reqLog)
+		}, &reqLog, req.Model)
 		return
 	}
 
@@ -2665,12 +2502,17 @@ func finishAnthropicStreamFailure(sw *sseWriter, w http.ResponseWriter, reqLog *
 	})
 }
 
-func streamAnthropicWithRetry(ctx context.Context, w http.ResponseWriter, fetch func() (*http.Response, *Account, error), reqLog *RequestLog) {
+func streamAnthropicWithRetry(ctx context.Context, w http.ResponseWriter, fetch func() (*http.Response, *Account, error), reqLog *RequestLog, requestedModel string) {
 	sw := newSSEWriter(w)
-	// 尝试次数不超过降级链上的模型数：每个模型只给一次机会。
 	maxAttempts := maxStreamAttempts
-	if n := len(modelFallbackChain(reqLog.Model)); n > 0 && n < maxAttempts {
-		maxAttempts = n
+	if requestedModel == "free" {
+		chain := getProxyConfig().ModelChain
+		if len(chain) == 0 {
+			chain = defaultFreeChain()
+		}
+		if n := len(filterStaleModels(chain)); n > 0 && n < maxAttempts {
+			maxAttempts = n
+		}
 	}
 	for attempt := 1; ; attempt++ {
 		if ctx.Err() != nil {
@@ -2698,12 +2540,11 @@ func streamAnthropicWithRetry(ctx context.Context, w http.ResponseWriter, fetch 
 		if ctx.Err() != nil {
 			return
 		}
-		// 上游在产出任何内容前失败（排队超时 / 空闲 504 / 早断流）：把这次实际使用的模型
-		// 标记为短时冷却，下一次尝试就会自动落到链上的下一个模型（pool 的选择器会跳过
-		// 冷却中的模型）。有备用模型时才冷却，避免把整条链一起冷掉。
-		if acc != nil && reqLog.Model != "" && hasAlternativeModel(acc, reqLog.Model) {
+		// 上游在产出任何内容前失败（排队超时 / 空闲 504 / 早断流）：只冷却本次
+		// 账号上的实际模型。free intent 可继续链上下一模型；显式 intent 只换同模型账号。
+		if acc != nil && reqLog.Model != "" && (requestedModel != "free" || hasAlternativeModel(acc, reqLog.Model)) {
 			setModelCooldown(acc, reqLog.Model, time.Now().Add(streamFailoverCooldown))
-			log.Printf("  anthropic stream: model %q produced no content, cooling it for %s and failing over",
+			log.Printf("  anthropic stream: model %q produced no content, cooling it for %s before retry",
 				reqLog.Model, streamFailoverCooldown)
 		}
 		if attempt >= maxAttempts {

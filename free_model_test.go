@@ -1462,7 +1462,7 @@ func TestHandleAnthropicStreamEmitsEmptyToolInput(t *testing.T) {
 	}
 }
 
-func TestCallClineAPIDirectModelsFallBackOnModelCooldown(t *testing.T) {
+func TestCallClineAPIExplicitModel429StaysOnRequestedModel(t *testing.T) {
 	oldPool := pool
 	oldConfig := getProxyConfig()
 	oldTransport := httpClient.Transport
@@ -1472,106 +1472,124 @@ func TestCallClineAPIDirectModelsFallBackOnModelCooldown(t *testing.T) {
 		httpClient.Transport = oldTransport
 	})
 
-	for _, model := range []string{freeModelPrimary, freeModelFallback} {
-		t.Run(model, func(t *testing.T) {
-			account := &Account{
-				AccountID:   "direct-account",
-				Email:       "direct@example.com",
-				AccessToken: "direct-token",
-				ExpiresAt:   time.Now().Add(time.Hour).UnixMilli(),
-				Status:      "active",
-			}
-			pool = &AccountPool{Accounts: []*Account{account}}
-			setProxyConfig(defaultProxyConfig())
+	const requestedModel = "cline-free/requested-model"
+	const fallbackModel = "cline-free/fallback-model"
+	pool = &AccountPool{Accounts: []*Account{
+		{AccountID: "direct-one", Email: "one@example.com", AccessToken: "token-one", ExpiresAt: time.Now().Add(time.Hour).UnixMilli(), Status: "active"},
+		{AccountID: "direct-two", Email: "two@example.com", AccessToken: "token-two", ExpiresAt: time.Now().Add(time.Hour).UnixMilli(), Status: "active"},
+	}}
+	config := defaultProxyConfig()
+	config.ModelChain = []string{fallbackModel}
+	setProxyConfig(config)
 
-			var attempted []string
-			httpClient.Transport = freeModelRoundTripper(func(req *http.Request) (*http.Response, error) {
-				body, err := io.ReadAll(req.Body)
-				if err != nil {
-					return nil, err
-				}
-				var params map[string]any
-				if err := json.Unmarshal(body, &params); err != nil {
-					return nil, err
-				}
-				upstreamModel, _ := params["model"].(string)
-				attempted = append(attempted, upstreamModel)
-				if upstreamModel == model {
-					return &http.Response{
-						StatusCode: http.StatusTooManyRequests,
-						Body:       io.NopCloser(strings.NewReader(`{"error":"quota"}`)),
-						Header:     make(http.Header),
-						Request:    req,
-					}, nil
-				}
-				return &http.Response{
-					StatusCode: http.StatusOK,
-					Body:       io.NopCloser(strings.NewReader(`{"id":"ok","choices":[{"message":{"role":"assistant","content":"hi"}}]}`)),
-					Header:     make(http.Header),
-					Request:    req,
-				}, nil
-			})
-
-			params := map[string]any{"model": model}
-			resp, _, err := callClineAPI(params, false)
-			if err != nil {
-				t.Fatalf("expected fallback success, got %v", err)
-			}
-			defer resp.Body.Close()
-			if len(attempted) < 2 {
-				t.Fatalf("expected fallback attempts after cooling model, got %v", attempted)
-			}
-			if attempted[0] != model {
-				t.Fatalf("first attempt = %q, want requested %q", attempted[0], model)
-			}
-			if attempted[len(attempted)-1] == model {
-				t.Fatal("fallback should not retry the cooling model")
-			}
-			if servedModel, _ := params["model"].(string); servedModel != attempted[len(attempted)-1] {
-				t.Fatalf("params model after fallback = %q, want last attempted %q", servedModel, attempted[len(attempted)-1])
-			}
-		})
-	}
-}
-
-func TestCallClineAPIDirectModelsNoFallbackOnServerError(t *testing.T) {
-	oldPool := pool
-	oldConfig := getProxyConfig()
-	oldTransport := httpClient.Transport
-	t.Cleanup(func() {
-		pool = oldPool
-		setProxyConfig(oldConfig)
-		httpClient.Transport = oldTransport
-	})
-
-	model := freeModelPrimary
-	account := &Account{
-		AccountID:   "direct-account",
-		Email:       "direct@example.com",
-		AccessToken: "direct-token",
-		ExpiresAt:   time.Now().Add(time.Hour).UnixMilli(),
-		Status:      "active",
-	}
-	pool = &AccountPool{Accounts: []*Account{account}}
-	setProxyConfig(defaultProxyConfig())
-
-	calls := 0
+	var attempted []string
 	httpClient.Transport = freeModelRoundTripper(func(req *http.Request) (*http.Response, error) {
-		calls++
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			return nil, err
+		}
+		var upstream map[string]any
+		if err := json.Unmarshal(body, &upstream); err != nil {
+			return nil, err
+		}
+		model, _ := upstream["model"].(string)
+		attempted = append(attempted, model)
+		if model == requestedModel {
+			return &http.Response{
+				StatusCode: http.StatusTooManyRequests,
+				Body:       io.NopCloser(strings.NewReader(`{"error":"quota","message":"Try again in 1h"}`)),
+				Header:     make(http.Header),
+				Request:    req,
+			}, nil
+		}
 		return &http.Response{
-			StatusCode: http.StatusInternalServerError,
-			Body:       io.NopCloser(strings.NewReader(`{"error":"boom"}`)),
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"id":"unexpected-fallback","choices":[]}`)),
 			Header:     make(http.Header),
 			Request:    req,
 		}, nil
 	})
 
-	_, _, err := callClineAPI(map[string]any{"model": model}, false)
-	if err == nil {
-		t.Fatal("expected error after exhausting the fallback chain")
+	params := map[string]any{"model": requestedModel}
+	resp, _, err := callClineAPI(params, false)
+	if resp != nil {
+		resp.Body.Close()
+		t.Fatal("explicit model should not return a fallback response")
 	}
-	if calls != len(freeModelChain) {
-		t.Fatalf("upstream calls = %d, want %d", calls, len(freeModelChain))
+	if _, ok := err.(*freeModelUnavailableError); !ok {
+		t.Fatalf("error = %T %v, want *freeModelUnavailableError", err, err)
+	}
+	if got, want := strings.Join(attempted, ","), requestedModel+","+requestedModel; got != want {
+		t.Fatalf("attempted models = %q, want %q", got, want)
+	}
+	if got := params["model"]; got != requestedModel {
+		t.Fatalf("params model = %v, want %q", got, requestedModel)
+	}
+}
+
+func TestCallClineAPIExplicitModel500DoesNotFallback(t *testing.T) {
+	oldPool := pool
+	oldConfig := getProxyConfig()
+	oldTransport := httpClient.Transport
+	t.Cleanup(func() {
+		pool = oldPool
+		setProxyConfig(oldConfig)
+		httpClient.Transport = oldTransport
+	})
+
+	const requestedModel = "cline-free/requested-model"
+	const fallbackModel = "cline-free/fallback-model"
+	pool = &AccountPool{Accounts: []*Account{{
+		AccountID: "direct-account", Email: "direct@example.com", AccessToken: "direct-token",
+		ExpiresAt: time.Now().Add(time.Hour).UnixMilli(), Status: "active",
+	}}}
+	config := defaultProxyConfig()
+	config.ModelChain = []string{fallbackModel}
+	setProxyConfig(config)
+
+	var attempted []string
+	httpClient.Transport = freeModelRoundTripper(func(req *http.Request) (*http.Response, error) {
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			return nil, err
+		}
+		var upstream map[string]any
+		if err := json.Unmarshal(body, &upstream); err != nil {
+			return nil, err
+		}
+		model, _ := upstream["model"].(string)
+		attempted = append(attempted, model)
+		if model == requestedModel {
+			return &http.Response{
+				StatusCode: http.StatusInternalServerError,
+				Body:       io.NopCloser(strings.NewReader(`{"error":"boom"}`)),
+				Header:     make(http.Header),
+				Request:    req,
+			}, nil
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"id":"unexpected-fallback","choices":[]}`)),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	})
+
+	params := map[string]any{"model": requestedModel}
+	resp, _, err := callClineAPI(params, false)
+	if resp != nil {
+		resp.Body.Close()
+		t.Fatal("explicit model should not return a fallback response")
+	}
+	apiErr, ok := err.(*clineAPIError)
+	if !ok || apiErr.statusCode != http.StatusInternalServerError {
+		t.Fatalf("error = %T %v, want 500 *clineAPIError", err, err)
+	}
+	if got, want := strings.Join(attempted, ","), requestedModel; got != want {
+		t.Fatalf("attempted models = %q, want %q", got, want)
+	}
+	if got := params["model"]; got != requestedModel {
+		t.Fatalf("params model = %v, want %q", got, requestedModel)
 	}
 }
 
