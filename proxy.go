@@ -947,7 +947,10 @@ func clineErrorHTTPStatus(err error) int {
 // servedByParam 是 callClineAPI 族回写在 params 上的「实际服务方」标记：
 // 自定义 provider 成功服务时写入 upstreamProvider。仅用于请求日志归因——
 // buildUpstreamBody / callProvider / callZenAPI 只拷贝白名单键，不会外发。
-const servedByParam = "__served_by"
+const (
+	servedByParam          = "__served_by"
+	skipProviderModelParam = "__skip_provider_model"
+)
 
 // stampUpstream 按实际服务结果写入请求日志的上游归因：
 // provider 标记 > 生效模型是 zen 模型（反向故障转移）> Cline 账号池。
@@ -992,13 +995,16 @@ func callClineAPI(params map[string]any, stream bool) (*http.Response, *Account,
 		return callFreeClineAPIForModel(params, stream, freeModelCanary)
 	}
 	// 显式模型严格路由：相同 model ID 的自定义 provider 优先，失败后只轮换
-	// Cline 账号；不进入 modelChain、free 链或 zen。
-	if pResp, pErr, attempted := callCustomProviderAPI(withModel(params, model), stream); attempted {
-		if pErr == nil {
-			params[servedByParam] = upstreamProvider
-			return pResp, nil, nil
+	// Cline 账号；不进入 modelChain、free 链或 zen。stream 首 token 前失敗時，
+	// skipProviderModelParam 只在本次 request map 生效，下一個 HTTP request 仍從 provider 開始。
+	if skippedModel, _ := params[skipProviderModelParam].(string); skippedModel != model {
+		if pResp, pErr, attempted := callCustomProviderAPI(withModel(params, model), stream); attempted {
+			if pErr == nil {
+				params[servedByParam] = upstreamProvider
+				return pResp, nil, nil
+			}
+			log.Printf("  provider attempt failed for %q: %v", model, pErr)
 		}
-		log.Printf("  provider attempt failed for %q: %v", model, pErr)
 	}
 
 	for {
@@ -1142,17 +1148,22 @@ func freeChainWithCurrent(current string) []string {
 	return chain
 }
 
-// hasActiveAccounts 池中是否存在 active 状态的账号。
-func hasActiveAccounts() bool {
+func activeAccountCount() int {
 	p := loadPool()
 	poolMu.Lock()
 	defer poolMu.Unlock()
+	count := 0
 	for _, a := range p.Accounts {
 		if a.Status == "active" {
-			return true
+			count++
 		}
 	}
-	return false
+	return count
+}
+
+// hasActiveAccounts 池中是否存在 active 状态的账号。
+func hasActiveAccounts() bool {
+	return activeAccountCount() > 0
 }
 
 func callFreeClineAPI(params map[string]any, stream bool) (*http.Response, *Account, error) {
@@ -2362,7 +2373,7 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 				stampUpstream(&reqLog, openAIReq) // 归因实际服务方（provider / opencode / cline）
 			}
 			return resp, acc, err
-		}, &reqLog, req.Model)
+		}, &reqLog, req.Model, openAIReq)
 		return
 	}
 
@@ -2414,10 +2425,31 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// maxStreamAttempts 预提交失败的最大尝试次数（含首次）。实际次数还会被降级链长度限制：
-// 3 次 × 短耐心，总等待被压在客户端可接受范围内，而不是在整条链上把时间耗光。
-// 链上有几个模型就最多试几个，避免在同一个模型上反复空等。
+// maxStreamAttempts 是单次 request 最多尝试的模型候选数。free intent 的实际
+// HTTP 尝试数还要乘上 active account 数，避免同模型账号轮替吃掉后续模型的预算。
 const maxStreamAttempts = 3
+
+func anthropicStreamAttemptLimit(requestedModel string) int {
+	if requestedModel != "free" {
+		return maxStreamAttempts
+	}
+	chain := getProxyConfig().ModelChain
+	if len(chain) == 0 {
+		chain = defaultFreeChain()
+	}
+	modelCount := len(filterStaleModels(chain))
+	if modelCount == 0 {
+		modelCount = 1
+	}
+	if modelCount > maxStreamAttempts {
+		modelCount = maxStreamAttempts
+	}
+	accountCount := activeAccountCount()
+	if accountCount == 0 {
+		accountCount = 1
+	}
+	return modelCount * accountCount
+}
 
 // firstContentTimeoutForAttempt 返回本次尝试等待「首个内容事件」的上限：
 // 普通尝试用较短的上限快速换模型；最后一次尝试放宽，宁可慢也尽量把答案交出去。
@@ -2436,8 +2468,8 @@ const streamFailoverCooldown = 2 * time.Minute
 // streamAnthropicWithRetry 获取上游响应并转发 Anthropic 流。
 //
 // 首 token 之前失败（预提交）可以透明重试：客户端只看到已发出的信封与 ping，
-// 看不到重试痕迹。每次失败还会把该模型短时冷却，使后续尝试自动切换到配置链上的
-// 下一个模型 —— 这是「点名模型老是超时」的缓解：坏模型自动让位给备用模型。
+// 看不到重试痕迹。free intent 可換同模型帳號或鏈上下一模型；explicit intent 只換
+// 同模型帳號。provider 空流只在本 request 內跳過，下一個 request 仍維持 provider 優先。
 // 预提交失败（上游在任何数据产出前断开/报错/静默超时）时客户端尚未收到任何字节，
 // 自动重新获取并重试，对客户端完全透明 —— 这是修复「流式经常断」的核心：
 // 排队/思考阶段的 504 idle timeout 以前会直接杀死流，现在变成一次不可见的重试。
@@ -2502,18 +2534,9 @@ func finishAnthropicStreamFailure(sw *sseWriter, w http.ResponseWriter, reqLog *
 	})
 }
 
-func streamAnthropicWithRetry(ctx context.Context, w http.ResponseWriter, fetch func() (*http.Response, *Account, error), reqLog *RequestLog, requestedModel string) {
+func streamAnthropicWithRetry(ctx context.Context, w http.ResponseWriter, fetch func() (*http.Response, *Account, error), reqLog *RequestLog, requestedModel string, params map[string]any) {
 	sw := newSSEWriter(w)
-	maxAttempts := maxStreamAttempts
-	if requestedModel == "free" {
-		chain := getProxyConfig().ModelChain
-		if len(chain) == 0 {
-			chain = defaultFreeChain()
-		}
-		if n := len(filterStaleModels(chain)); n > 0 && n < maxAttempts {
-			maxAttempts = n
-		}
-	}
+	maxAttempts := anthropicStreamAttemptLimit(requestedModel)
 	for attempt := 1; ; attempt++ {
 		if ctx.Err() != nil {
 			return // 客户端已断开，不再发起上游请求
@@ -2532,9 +2555,13 @@ func streamAnthropicWithRetry(ctx context.Context, w http.ResponseWriter, fetch 
 			return
 		}
 		resp.Body.Close()
+		if acc == nil && reqLog.Upstream == upstreamProvider {
+			params[skipProviderModelParam] = requestedModel
+			log.Printf("  anthropic stream: provider produced no content, trying Cline accounts for the same model")
+		}
 		// 客户端主动断开（Esc 中断 / Claude Code 空闲看门狗重连）不是模型的失败：
-		// 此时冷却会把用户点名/配置的模型拉黑 2 分钟，后续请求被静默赶到回退链上，
-		// 表现为「配置了模型却总走 fallback」。实测见 proxy.log 2026/09/26 09:52:52 /
+		// 此时冷却会让后续 request 跳过仍可用的同模型账号或 free-chain 模型。
+		// 实测见 proxy.log 2026/09/26 09:52:52 /
 		// 09:59:00：「client disconnected before first token」紧跟 pixel-canary 被冷却。
 		// ctx 由 r.Context() 派生，在 handler 内只有客户端断开才会取消。
 		if ctx.Err() != nil {

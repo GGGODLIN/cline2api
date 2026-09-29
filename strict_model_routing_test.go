@@ -263,10 +263,10 @@ func TestAnthropicFreeStreamKeepsModelChainRetry(t *testing.T) {
 	t.Setenv("CLINE2API_FIRST_CONTENT_TIMEOUT_MS", "1")
 	t.Setenv("CLINE2API_LAST_ATTEMPT_TIMEOUT_MS", "1")
 
-	pool = &AccountPool{Accounts: []*Account{{
-		AccountID: "free-stream", Email: "free@example.com", AccessToken: "free-token",
-		ExpiresAt: time.Now().Add(time.Hour).UnixMilli(), Status: "active",
-	}}}
+	pool = &AccountPool{Accounts: []*Account{
+		{AccountID: "free-stream-one", Email: "one@example.com", AccessToken: "free-token-one", ExpiresAt: time.Now().Add(time.Hour).UnixMilli(), Status: "active"},
+		{AccountID: "free-stream-two", Email: "two@example.com", AccessToken: "free-token-two", ExpiresAt: time.Now().Add(time.Hour).UnixMilli(), Status: "active"},
+	}}
 	config := defaultProxyConfig()
 	config.ModelChain = []string{freeModelPrimary, freeModelFallback}
 	setProxyConfig(config)
@@ -312,7 +312,109 @@ func TestAnthropicFreeStreamKeepsModelChainRetry(t *testing.T) {
 	if !strings.Contains(string(responseBody), "free fallback") {
 		t.Fatalf("response body = %q, want free-chain fallback content", responseBody)
 	}
-	if got, want := strings.Join(models, ","), freeModelPrimary+","+freeModelFallback; got != want {
+	if got, want := strings.Join(models, ","), freeModelPrimary+","+freeModelPrimary+","+freeModelFallback; got != want {
 		t.Fatalf("upstream models = %q, want %q", got, want)
+	}
+}
+
+func TestAnthropicExplicitStreamUsesClineAfterProviderEmptyStream(t *testing.T) {
+	const requestedModel = "cline-free/provider-empty-model"
+	const providerID = "strict_empty_stream_provider"
+
+	oldPool := pool
+	oldConfig := getProxyConfig()
+	oldTransport := httpClient.Transport
+	t.Cleanup(func() {
+		pool = oldPool
+		setProxyConfig(oldConfig)
+		httpClient.Transport = oldTransport
+		_ = deleteProvider(providerID)
+	})
+	t.Setenv("CLINE2API_FIRST_CONTENT_TIMEOUT_MS", "1")
+	t.Setenv("CLINE2API_LAST_ATTEMPT_TIMEOUT_MS", "1")
+
+	pool = &AccountPool{Accounts: []*Account{{
+		AccountID: "provider-empty-cline", Email: "cline@example.com", AccessToken: "cline-token",
+		ExpiresAt: time.Now().Add(time.Hour).UnixMilli(), Status: "active",
+	}}}
+	setProxyConfig(defaultProxyConfig())
+	upsertProvider(&CustomProvider{
+		ID: providerID, Name: "Empty Stream Provider", BaseURL: "http://provider.test/v1",
+		APIKey: "sk-test", ModelIDs: []string{requestedModel}, Enabled: true, Priority: 1,
+	})
+
+	providerCalls := 0
+	clineCalls := 0
+	var clineModels []string
+	httpClient.Transport = freeModelRoundTripper(func(req *http.Request) (*http.Response, error) {
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			return nil, err
+		}
+		var params map[string]any
+		if err := json.Unmarshal(body, &params); err != nil {
+			return nil, err
+		}
+		model, _ := params["model"].(string)
+		if req.URL.Host == "provider.test" {
+			providerCalls++
+			streamBody := "data: [DONE]\n\n"
+			if providerCalls == 2 {
+				streamBody = "data: {\"model\":\"" + model + "\",\"choices\":[{\"delta\":{\"content\":\"provider next request\"}}]}\n\ndata: [DONE]\n\n"
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(streamBody)),
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Request:    req,
+			}, nil
+		}
+		clineCalls++
+		clineModels = append(clineModels, model)
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body: io.NopCloser(strings.NewReader(
+				"data: {\"model\":\"" + model + "\",\"choices\":[{\"delta\":{\"content\":\"cline exact model\"}}]}\n\ndata: [DONE]\n\n",
+			)),
+			Header:  http.Header{"Content-Type": []string{"text/event-stream"}},
+			Request: req,
+		}, nil
+	})
+
+	baseURL := protocolTestServer(t)
+	send := func() string {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodPost, baseURL+"/v1/messages", strings.NewReader(`{"model":"cline-free/provider-empty-model","stream":true,"max_tokens":32,"messages":[{"role":"user","content":"hello"}]}`))
+		if err != nil {
+			t.Fatalf("create request: %v", err)
+		}
+		resp, err := (&http.Client{Transport: &http.Transport{}, Timeout: 2 * time.Second}).Do(req)
+		if err != nil {
+			t.Fatalf("send request: %v", err)
+		}
+		defer resp.Body.Close()
+		responseBody, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("read response: %v", err)
+		}
+		return string(responseBody)
+	}
+
+	firstResponse := send()
+	if !strings.Contains(firstResponse, "cline exact model") {
+		t.Fatalf("first response = %q, want same-model Cline fallback", firstResponse)
+	}
+	secondResponse := send()
+	if !strings.Contains(secondResponse, "provider next request") {
+		t.Fatalf("second response = %q, want provider ordering restored for new request", secondResponse)
+	}
+	if providerCalls != 2 {
+		t.Fatalf("provider calls = %d, want 2", providerCalls)
+	}
+	if clineCalls != 1 {
+		t.Fatalf("Cline calls = %d, want 1", clineCalls)
+	}
+	if got, want := strings.Join(clineModels, ","), requestedModel; got != want {
+		t.Fatalf("Cline models = %q, want %q", got, want)
 	}
 }
