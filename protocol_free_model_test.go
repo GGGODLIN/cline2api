@@ -689,7 +689,7 @@ func TestAnthropicMessagesFreeDSUsesStrictAlias(t *testing.T) {
 	}
 }
 
-func TestOfflineModelsRetainLongcatBuiltinWithoutFreeFallback(t *testing.T) {
+func TestOfflineModelsRetainForkMuseDependencyAndUpstreamFreeChain(t *testing.T) {
 	oldPool := pool
 	remoteZenEnabledMu.Lock()
 	oldRemoteZenEnabled := remoteZenEnabled
@@ -731,7 +731,7 @@ func TestOfflineModelsRetainLongcatBuiltinWithoutFreeFallback(t *testing.T) {
 	if !foundMuse {
 		t.Fatalf("offline models should retain %s", freeModelMuse)
 	}
-	if got, want := strings.Join(freeModelChain, ","), freeModelPrimary+","+freeModelFallback; got != want {
+	if got, want := strings.Join(freeModelChain, ","), freeModelPrimary+","+freeModelFallback+","+freeModelLastResort; got != want {
 		t.Fatalf("free model chain = %q, want %q", got, want)
 	}
 }

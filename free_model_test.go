@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -416,7 +417,7 @@ func TestCallClineAPIFreeFallsBackToDSAfterAllGLMAccountsUnavailable(t *testing.
 		}
 		model, _ := upstream["model"].(string)
 		models = append(models, model)
-		if token == "token-one" && model == "cline-free/mimo-v2.6-flash" || token == "token-two" {
+		if token == "token-one" && model == freeModelPrimary || token == "token-two" {
 			return &http.Response{
 				StatusCode: http.StatusTooManyRequests,
 				Body:       io.NopCloser(strings.NewReader(`{"error":"quota","message":"Try again in 1h"}`)),
@@ -451,10 +452,10 @@ func TestCallClineAPIFreeFallsBackToDSAfterAllGLMAccountsUnavailable(t *testing.
 	if got, want := strings.Join(attempts, ","), "token-one,token-two,token-one"; got != want {
 		t.Fatalf("attempts = %q, want %q", got, want)
 	}
-	if got, want := strings.Join(models, ","), "cline-free/mimo-v2.6-flash,cline-free/mimo-v2.6-flash,deepseek/deepseek-v4-flash"; got != want {
+	if got, want := strings.Join(models, ","), freeModelPrimary+","+freeModelPrimary+","+freeModelFallback; got != want {
 		t.Fatalf("models = %q, want %q", got, want)
 	}
-	if got, want := params["model"], "deepseek/deepseek-v4-flash"; got != want {
+	if got, want := params["model"], freeModelFallback; got != want {
 		t.Fatalf("effective model = %v, want %q", got, want)
 	}
 }
@@ -1291,6 +1292,7 @@ func TestBuildUpstreamBodyPreservesMaxEffortForOtherModels(t *testing.T) {
 }
 
 func TestBuildUpstreamBodyAcceptsIntegerMaxTokens(t *testing.T) {
+	t.Setenv("CLINE2API_MAX_TOKENS", "65536")
 	body := buildUpstreamBody(map[string]any{
 		"model":      freeModelPrimary,
 		"max_tokens": 65536,
@@ -1301,6 +1303,7 @@ func TestBuildUpstreamBodyAcceptsIntegerMaxTokens(t *testing.T) {
 }
 
 func TestBuildUpstreamBodyClampsGeminiOutputLimit(t *testing.T) {
+	t.Setenv("CLINE2API_MAX_TOKENS", "128000")
 	for _, maxTokens := range []any{float64(128000), 128000} {
 		body := buildUpstreamBody(map[string]any{
 			"model":      "cline-free/gemini-3.8-flash",
@@ -1313,6 +1316,7 @@ func TestBuildUpstreamBodyClampsGeminiOutputLimit(t *testing.T) {
 }
 
 func TestBuildUpstreamBodyPreservesUnknownModelOutputLimit(t *testing.T) {
+	t.Setenv("CLINE2API_MAX_TOKENS", "128000")
 	body := buildUpstreamBody(map[string]any{
 		"model":      "custom/unknown-model",
 		"max_tokens": 128000,
@@ -1384,7 +1388,7 @@ func TestHandleStreamResponseIgnoresNullErrorField(t *testing.T) {
 	}
 }
 
-func TestHandleAnthropicStreamMarksSSEErrorIncomplete(t *testing.T) {
+func TestHandleAnthropicStreamReturnsUncommittedOnSSEError(t *testing.T) {
 	isolateRequestLogs(t)
 	recorder := httptest.NewRecorder()
 	upstream := &http.Response{
@@ -1395,20 +1399,16 @@ func TestHandleAnthropicStreamMarksSSEErrorIncomplete(t *testing.T) {
 	}
 	reqLog := RequestLog{ID: "anthropic-sse-error", Model: freeModelMuse, StartedAt: time.Now()}
 
-	handleAnthropicStream(recorder, upstream, nil, &reqLog)
+	committed := handleAnthropicStream(context.Background(), newSSEWriter(recorder), upstream, nil, &reqLog, 5*time.Second)
 
+	if committed {
+		t.Fatal("SSE error before content should remain retryable")
+	}
 	if reqLog.Completed {
 		t.Fatal("SSE error should not be marked completed")
 	}
-	if !strings.Contains(reqLog.Error, "stream_initialization_failed") {
-		t.Fatalf("request log error = %q", reqLog.Error)
-	}
-	body := recorder.Body.String()
-	if !strings.Contains(body, "event: error") {
-		t.Fatalf("response body = %q", body)
-	}
-	if strings.Contains(body, "event: message_stop") {
-		t.Fatalf("error stream should not emit message_stop: %q", body)
+	if strings.Contains(recorder.Body.String(), "event: message_stop") {
+		t.Fatalf("error stream should not emit message_stop: %q", recorder.Body.String())
 	}
 }
 
@@ -1425,11 +1425,11 @@ func TestHandleAnthropicStreamEmitsToolInputJSONDelta(t *testing.T) {
 	}
 	reqLog := RequestLog{ID: "anthropic-tool-input", Model: freeModelPrimary, StartedAt: time.Now()}
 
-	handleAnthropicStream(recorder, upstream, nil, &reqLog)
+	handleAnthropicStream(context.Background(), newSSEWriter(recorder), upstream, nil, &reqLog, 5*time.Second)
 
 	body := recorder.Body.String()
 	for _, want := range []string{
-		`"model":"google/gemini-3.8-flash"`,
+		`"model":"` + freeModelPrimary + `"`,
 		`event: content_block_start`,
 		`"type":"input_json_delta"`,
 		`"partial_json":"{\"city\":\"Taipei\"}"`,
@@ -1454,69 +1454,11 @@ func TestHandleAnthropicStreamEmitsEmptyToolInput(t *testing.T) {
 	}
 	reqLog := RequestLog{ID: "anthropic-empty-tool-input", Model: freeModelPrimary, StartedAt: time.Now()}
 
-	handleAnthropicStream(recorder, upstream, nil, &reqLog)
+	handleAnthropicStream(context.Background(), newSSEWriter(recorder), upstream, nil, &reqLog, 5*time.Second)
 
 	body := recorder.Body.String()
 	if !strings.Contains(body, `"partial_json":"{}"`) {
 		t.Fatalf("response body missing empty tool input: %s", body)
-	}
-}
-
-func TestHandleAnthropicStreamFallsBackOnFirstPayloadWithoutModel(t *testing.T) {
-	isolateRequestLogs(t)
-	recorder := httptest.NewRecorder()
-	upstream := &http.Response{
-		StatusCode: http.StatusOK,
-		Body: io.NopCloser(strings.NewReader(
-			"data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n" +
-				"data: {\"model\":\"actual-model\",\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n" +
-				"data: [DONE]\n\n",
-		)),
-	}
-	reqLog := RequestLog{ID: "anthropic-stream-fallback", Model: "requested-model", StartedAt: time.Now()}
-
-	handleAnthropicStream(recorder, upstream, nil, &reqLog)
-
-	body := recorder.Body.String()
-	if strings.Count(body, "event: message_start") != 1 {
-		t.Fatalf("message_start count = %d, want 1: %s", strings.Count(body, "event: message_start"), body)
-	}
-	if !strings.Contains(body, `"model":"requested-model"`) {
-		t.Fatalf("response body missing requested-model fallback: %s", body)
-	}
-	if start, content := strings.Index(body, "event: message_start"), strings.Index(body, "event: content_block_start"); start < 0 || content < 0 || start > content {
-		t.Fatalf("message_start must precede content blocks: %s", body)
-	}
-}
-
-func TestHandleAnthropicStreamFlushesHeadersBeforeFirstPayload(t *testing.T) {
-	isolateRequestLogs(t)
-	reader, writer := io.Pipe()
-	recorder := newFlushSignalRecorder()
-	upstream := &http.Response{StatusCode: http.StatusOK, Body: reader}
-	reqLog := RequestLog{ID: "anthropic-slow-first-payload", Model: "requested-model", StartedAt: time.Now()}
-	done := make(chan struct{})
-	go func() {
-		handleAnthropicStream(recorder, upstream, nil, &reqLog)
-		close(done)
-	}()
-
-	select {
-	case <-recorder.flushed:
-	case <-time.After(250 * time.Millisecond):
-		writer.Close()
-		<-done
-		t.Fatal("response headers were not flushed before the first upstream payload")
-	}
-
-	if _, err := writer.Write([]byte("data: {\"model\":\"actual-model\",\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n")); err != nil {
-		t.Fatalf("write upstream payload: %v", err)
-	}
-	writer.Close()
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("stream handler did not finish after upstream closed")
 	}
 }
 
@@ -1766,6 +1708,121 @@ func TestSortModelsByAvailabilityPrefersAvailableThenLeastUsed(t *testing.T) {
 	}
 	if len(got) != 2 {
 		t.Fatalf("chain length = %d, want 2", len(got))
+	}
+}
+
+// 信封提前发送架构下 message_start.model 取 reqLog.Model（fetch 成功时已从别名
+// 更新为实际请求上游的模型），不再发空串 —— 客户端不丢失流式消息的模型身份。
+// Anthropic 协议 message_start 每条消息只发一次，上游 payload 的 model 不会回写。
+func TestHandleAnthropicStreamPreservesUpstreamModel(t *testing.T) {
+	requestLogsMu.Lock()
+	oldLogs := requestLogs
+	requestLogs = nil
+	requestLogsMu.Unlock()
+	t.Cleanup(func() {
+		requestLogsMu.Lock()
+		requestLogs = oldLogs
+		requestLogsMu.Unlock()
+	})
+
+	recorder := httptest.NewRecorder()
+	upstream := &http.Response{
+		StatusCode: http.StatusOK,
+		Body: io.NopCloser(strings.NewReader(
+			"data: {\"model\":\"google/gemini-3.8-flash\",\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n" +
+				"data: [DONE]\n\n",
+		)),
+	}
+	// 模拟别名 cline-free/gemini-3.8-flash 在 fetch 时解析为实际上游模型后的 reqLog
+	reqLog := RequestLog{ID: "anthropic-stream-model", Model: "google/gemini-3.8-flash", StartedAt: time.Now()}
+
+	sw := newSSEWriter(recorder)
+	handleAnthropicStream(context.Background(), sw, upstream, nil, &reqLog, 5*time.Second)
+
+	body := recorder.Body.String()
+	if !strings.Contains(body, `"model":"google/gemini-3.8-flash"`) {
+		t.Fatalf("response body missing upstream model: %s", body)
+	}
+}
+
+// message_start 只发一次、先于内容块，且携带请求的服务模型（reqLog.Model），
+// 后续上游 payload 的 model 元数据不回写已发出的信封。
+func TestHandleAnthropicStreamFallsBackOnFirstPayloadWithoutModel(t *testing.T) {
+	requestLogsMu.Lock()
+	oldLogs := requestLogs
+	requestLogs = nil
+	requestLogsMu.Unlock()
+	t.Cleanup(func() {
+		requestLogsMu.Lock()
+		requestLogs = oldLogs
+		requestLogsMu.Unlock()
+	})
+
+	recorder := httptest.NewRecorder()
+	upstream := &http.Response{
+		StatusCode: http.StatusOK,
+		Body: io.NopCloser(strings.NewReader(
+			"data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n" +
+				"data: {\"model\":\"actual-model\",\"choices\":[{\"delta\":{\"content\":\"more\"},\"finish_reason\":\"stop\"}]}\n\n" +
+				"data: [DONE]\n\n",
+		)),
+	}
+	reqLog := RequestLog{ID: "anthropic-stream-fallback", Model: "requested-model", StartedAt: time.Now()}
+
+	sw := newSSEWriter(recorder)
+	handleAnthropicStream(context.Background(), sw, upstream, nil, &reqLog, 5*time.Second)
+
+	body := recorder.Body.String()
+	if strings.Count(body, "event: message_start") != 1 {
+		t.Fatalf("message_start count = %d, want 1: %s", strings.Count(body, "event: message_start"), body)
+	}
+	if !strings.Contains(body, `"model":"requested-model"`) {
+		t.Fatalf("response body missing requested-model fallback: %s", body)
+	}
+	if start, content := strings.Index(body, "event: message_start"), strings.Index(body, "event: content_block_start"); start < 0 || content < 0 || start > content {
+		t.Fatalf("message_start must precede content blocks: %s", body)
+	}
+}
+
+// 上游首条 payload 迟迟不来时，响应头（含信封 + ping）必须先于等待刷出去。
+func TestHandleAnthropicStreamFlushesHeadersBeforeFirstPayload(t *testing.T) {
+	requestLogsMu.Lock()
+	oldLogs := requestLogs
+	requestLogs = nil
+	requestLogsMu.Unlock()
+	t.Cleanup(func() {
+		requestLogsMu.Lock()
+		requestLogs = oldLogs
+		requestLogsMu.Unlock()
+	})
+
+	reader, writer := io.Pipe()
+	recorder := newFlushSignalRecorder()
+	upstream := &http.Response{StatusCode: http.StatusOK, Body: reader}
+	reqLog := RequestLog{ID: "anthropic-slow-first-payload", Model: "requested-model", StartedAt: time.Now()}
+	done := make(chan struct{})
+	go func() {
+		sw := newSSEWriter(recorder)
+		handleAnthropicStream(context.Background(), sw, upstream, nil, &reqLog, 5*time.Second)
+		close(done)
+	}()
+
+	select {
+	case <-recorder.flushed:
+	case <-time.After(250 * time.Millisecond):
+		writer.Close()
+		<-done
+		t.Fatal("response headers were not flushed before the first upstream payload")
+	}
+
+	if _, err := writer.Write([]byte("data: {\"model\":\"actual-model\",\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n")); err != nil {
+		t.Fatalf("write upstream payload: %v", err)
+	}
+	writer.Close()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("stream handler did not finish after upstream closed")
 	}
 }
 
