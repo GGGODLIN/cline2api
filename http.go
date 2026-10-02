@@ -29,7 +29,9 @@ var httpTransport = &http.Transport{
 	ExpectContinueTimeout: 1 * time.Second,
 	// 响应头限时：非流式请求在生成完成前不返回响应头，等价于旧的兜底超时；
 	// 流式响应的响应头几乎立即到达，不限制流的后续读取时长。
-	ResponseHeaderTimeout: 5 * time.Minute,
+	// 30 分钟而非 5 分钟：CC 串流断掉后会退回非流式，muse 等慢模型 max effort 一轮常超过 5 分钟，
+	// 5 分钟上限会让同一轮无限重送、永远拿不到回应（harbor exam2 muse #2153、#2235 实例）。
+	ResponseHeaderTimeout: 30 * time.Minute,
 }
 
 var httpClient = &http.Client{
