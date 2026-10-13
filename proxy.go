@@ -21,13 +21,8 @@ import (
 )
 
 const (
-	// defaultMaxTokens 是上游请求的默认/上限输出 token 数。
-	//
-	// 从 128000 降到 32000：日志实测 poolside/laguna-s-2.1:free 直接 400 ——
-	// "maximum context length is 262144 tokens, however you requested about 263503
-	// tokens (88799 text input, 46704 tool input, 128000 in the output)"。
-	// 也就是说 128k 的输出预留本身就能把请求顶出上下文窗口，让本来可用的模型直接失败，
-	// 并让其余模型陷入超长预填充/静默。可用 CLINE2API_MAX_TOKENS 调整。
+	// defaultMaxTokens 只補未知模型省略的輸出預算，不夾低合法顯式值。
+	// 未核實的模型不能套其他來源上限；已鎖定的免費模型另用自己的 Output。
 	defaultMaxTokens                     = 32000
 	defaultReasoningEffort               = "high"
 	fallbackDefaultModel                 = "z-ai/glm-5.3-flash"
@@ -71,17 +66,30 @@ const defaultFirstContentTimeout = 20 * time.Second
 // 可用 CLINE2API_LAST_ATTEMPT_TIMEOUT_MS 覆盖。
 const lastAttemptFirstContentTimeout = 45 * time.Second
 
-// maxOutputTokens 是客户端请求中 max_tokens 的上限。
-// 客户端显式要更大的输出（例如 128k）也会被夹到这里：预留过大的输出空间会把输入+输出
-// 顶出上游上下文窗口（实测 400），收益却接近没有。
+// maxOutputTokens 是省略输出预算时补上的默认值。
+// 未设 CLINE2API_MAX_TOKENS 时它不是显式请求的硬上限：未知模型的合法输出上限
+// 只有上游正式契约知道，预先夹低会直接缩短免费模型的可用输出。
 func maxOutputTokens() int {
 	return envInt("CLINE2API_MAX_TOKENS", defaultMaxTokens)
 }
 
-// clampMaxTokens 把请求的输出上限夹到 [1, maxOutputTokens()]。
+// configuredOutputTokenCap 只认使用者明确设置的输出硬上限。
+// 未设置时返回 0，避免把省略场景的默认预算套到显式请求上。
+func configuredOutputTokenCap() int {
+	n, err := strconv.Atoi(strings.TrimSpace(os.Getenv("CLINE2API_MAX_TOKENS")))
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return n
+}
+
+// clampMaxTokens 只应用使用者明确设置的输出硬上限；未设置时保留合法显式值。
+// 0 与负数仍回到默认预算，因为它们表示客户端没有给出可用的输出上限。
 func clampMaxTokens(n int) int {
-	limit := maxOutputTokens()
-	if n <= 0 || n > limit {
+	if n <= 0 {
+		return maxOutputTokens()
+	}
+	if limit := configuredOutputTokenCap(); limit > 0 && n > limit {
 		return limit
 	}
 	return n
@@ -783,6 +791,49 @@ func numericInt(value any) (int, bool) {
 	}
 }
 
+func diagnosticBudget(params map[string]any) bool {
+	meta, ok := params["metadata"].(map[string]any)
+	if !ok {
+		return false
+	}
+	mode, _ := meta["budget_mode"].(string)
+	return mode == "diagnostic"
+}
+
+func metadataForUpstream(params map[string]any) (map[string]any, bool) {
+	meta, ok := params["metadata"].(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	copied := make(map[string]any, len(meta))
+	for key, value := range meta {
+		if key == "budget_mode" {
+			continue
+		}
+		copied[key] = value
+	}
+	if len(copied) == 0 {
+		return nil, false
+	}
+	return copied, true
+}
+
+func lockedFreeOutputBudget(model string) (int, bool) {
+	if strings.TrimSpace(model) == "" {
+		return 0, false
+	}
+	p := loadPool()
+	poolMu.Lock()
+	defer poolMu.Unlock()
+	for _, m := range p.Models {
+		if m.ID != model || !m.MetaLocked || m.Output <= 0 || m.Cost != "free" || isZenSource(m) {
+			continue
+		}
+		return m.Output, true
+	}
+	return 0, false
+}
+
 // modelMaxOutputLimit 返回模型已知的最大输出 token 硬上限（0=未知，不封顶）。
 // 已知硬限制表优先（gemini-3.8-flash 等）；其次取池中该模型的 Output 元数据
 // （remote 同步 / 管理页设置 / 用户自定义模型）。zen 模型的 Output 是压缩预算
@@ -810,10 +861,10 @@ func buildUpstreamBody(params map[string]any, stream bool) map[string]any {
 
 	maxTokens := maxOutputTokens()
 	source := ""
-	if mt, ok := numericInt(params["max_tokens"]); ok {
-		maxTokens, source = clampMaxTokens(mt), "max_tokens"
-	} else if mt, ok := numericInt(params["max_completion_tokens"]); ok {
-		maxTokens, source = clampMaxTokens(mt), "max_completion_tokens"
+	if mt, ok := numericInt(params["max_tokens"]); ok && mt > 0 {
+		maxTokens, source = mt, "max_tokens"
+	} else if mt, ok := numericInt(params["max_completion_tokens"]); ok && mt > 0 {
+		maxTokens, source = mt, "max_completion_tokens"
 	}
 	// 客户端发的 0 视为未设置、1~15 低于上游硬下限：一律兜到默认值，
 	// 否则 muse-spark 等模型直接 400 且错误会被回退链吞掉
@@ -828,7 +879,18 @@ func buildUpstreamBody(params map[string]any, stream bool) map[string]any {
 	if m, ok := params["model"].(string); ok && m != "" {
 		model = m
 	}
+	diagnostic := diagnosticBudget(params)
+	if !diagnostic {
+		// 已由管理员逐个核验并锁定的免费模型，请求里的小预算不能代表模型能力。
+		// 未锁定、Output 未知、付费或 zen 模型都保持调用方原值。
+		if requested, ok := lockedFreeOutputBudget(model); ok && maxTokens < requested {
+			maxTokens = requested
+		}
+	}
 
+	if limit := configuredOutputTokenCap(); limit > 0 && maxTokens > limit {
+		maxTokens = limit
+	}
 	// 模型已知硬上限封顶：gemini-3.8-flash 最大输出 65536，默认预算 128000 会被
 	// 上游网关 400（maxOutputTokens out of range / Request contains an invalid argument），
 	// 且 429 配额限流回退到 vertex/google 路由时必现。
@@ -872,6 +934,12 @@ func buildUpstreamBody(params map[string]any, stream bool) map[string]any {
 	}
 
 	for _, key := range passThroughKeys {
+		if key == "metadata" {
+			if meta, ok := metadataForUpstream(params); ok {
+				body[key] = meta
+			}
+			continue
+		}
 		if val, ok := params[key]; ok {
 			body[key] = val
 		}
