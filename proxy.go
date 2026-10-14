@@ -1323,6 +1323,9 @@ func callClineAPIWithAccount(acc *Account, params map[string]any, stream bool) (
 }
 
 func callClineAPIWithAccountCtx(ctx context.Context, acc *Account, params map[string]any, stream bool) (*http.Response, *Account, error) {
+	if accountsHandoffPaused() {
+		return nil, acc, &clineAPIError{statusCode: http.StatusServiceUnavailable, message: errHandoffPaused.Error()}
+	}
 	token, err := ensureAccountToken(acc)
 	if err != nil {
 		// Try other accounts
@@ -1460,6 +1463,9 @@ func startCooldownRecovery() {
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
 		for range ticker.C {
+			if accountsHandoffPaused() {
+				continue
+			}
 			p := loadPool()
 			poolMu.Lock()
 			var toRecover []*Account

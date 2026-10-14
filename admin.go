@@ -65,6 +65,7 @@ func registerAdminRoutes(mux *http.ServeMux) {
 	auth := func(h http.HandlerFunc) http.HandlerFunc {
 		return requireAdminAuth(corsHandler(h))
 	}
+	mux.HandleFunc("/admin/api/accounts/handoff", handleAccountsHandoff)
 	mux.HandleFunc("/admin/api/accounts", auth(handleAdminAccounts))
 	mux.HandleFunc("/admin/api/accounts/add", auth(handleAdminAccountAdd))
 	mux.HandleFunc("/admin/api/accounts/delete", auth(handleAdminAccountDelete))

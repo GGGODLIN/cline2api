@@ -84,12 +84,20 @@ func loadPool() *AccountPool {
 	if p.Models == nil {
 		p.Models = []Model{}
 	}
+	if err := restoreStoredCredentials(data, &p); err != nil {
+		pool = &AccountPool{Accounts: []*Account{}, Keys: []string{}, Models: []Model{}}
+		return pool
+	}
 	pool = &p
 	return pool
 }
 
 func savePool() {
-	data, _ := json.MarshalIndent(pool, "", "  ")
+	data, err := marshalPoolStorage(pool)
+	if err != nil {
+		log.Printf("Failed to encode account storage")
+		return
+	}
 	if err := os.WriteFile(poolPath, data, 0600); err != nil {
 		log.Printf("Failed to save accounts: %v", err)
 	}
@@ -167,6 +175,10 @@ func getAccountByID(accountID string) *Account {
 }
 
 func refreshAccountToken(acc *Account) error {
+	if err := beginAccountRefresh(); err != nil {
+		return err
+	}
+	defer handoffInflight.Done()
 	resp, err := refreshClineToken(acc.RefreshToken)
 	if err != nil {
 		if isRefreshRejected(err) {
@@ -396,6 +408,9 @@ func pickAccountLocked(p *AccountPool) *Account {
 }
 
 func ensureAccountToken(acc *Account) (string, error) {
+	if accountsHandoffPaused() {
+		return "", errHandoffPaused
+	}
 	if acc.AccessToken != "" && time.Now().UnixMilli() < acc.ExpiresAt {
 		return acc.AccessToken, nil
 	}
